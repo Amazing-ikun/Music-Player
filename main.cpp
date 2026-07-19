@@ -143,7 +143,7 @@ static bool CodeToBinding(const std::wstring& code, int& vk, int& mod) {
 
 // Forward declaration for the hotkey dialog
 class MainWindow;
-static INT_PTR CALLBACK HotkeyDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
+static LRESULT CALLBACK HotkeyDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
 
 // ==========================================
 // MainWindow
@@ -152,7 +152,7 @@ class MainWindow {
 public:
     MainWindow()
         : m_hwnd(NULL), m_hInst(NULL)
-        , m_playlistLV(NULL)
+        , m_playlistLV(NULL), m_searchEdit(NULL)
         , m_btnPrev(NULL), m_btnPlay(NULL), m_btnNext(NULL), m_btnMode(NULL)
         , m_trackSeek(NULL), m_sliderVol(NULL), m_staticVolPct(NULL)
         , m_staticTime(NULL), m_staticSong(NULL)
@@ -204,6 +204,7 @@ private:
     HWND m_hwnd;
     HINSTANCE m_hInst;
     HWND m_playlistLV;
+    HWND m_searchEdit;
     HWND m_btnPrev, m_btnPlay, m_btnNext, m_btnMode;
     HWND m_trackSeek, m_sliderVol, m_staticVolPct;
     HWND m_staticTime, m_staticSong;
@@ -215,6 +216,7 @@ private:
     bool             m_userDraggingSeek;
     int              m_sortColumn;
     bool             m_sortAscending;
+    std::vector<int> m_filterMap;  // display row → playlist index
 
     // ---- Shuffle ----
     std::vector<int> m_shuffleOrder;
@@ -394,6 +396,14 @@ private:
             ListView_InsertColumn(m_playlistLV, i, &lc);
         }
 
+        // ---- Search ----
+        CreateWindowExW(0, L"STATIC", L"搜索:",
+            WS_CHILD | WS_VISIBLE,
+            0, 0, 0, 0, m_hwnd, NULL, m_hInst, NULL);
+        m_searchEdit = CreateWindowExW(0, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_LEFT,
+            0, 0, 0, 0, m_hwnd, (HMENU)IDC_SEARCH_EDIT, m_hInst, NULL);
+
         m_btnMode = CreateWindowExW(0, L"BUTTON", L"顺序播放",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             0, 0, 0, 0, m_hwnd, (HMENU)IDC_BTN_MODE, m_hInst, NULL);
@@ -446,11 +456,24 @@ private:
         GetClientRect(m_hwnd, &rc);
         int w = rc.right, h = rc.bottom;
         const int M = 8;
+        const int searchH = 22;
         const int ctrlAreaH = 118;
-        int listH = h - ctrlAreaH;
+        int listH = h - ctrlAreaH - searchH - M;
         if (listH < 30) listH = 30;
 
-        SetWindowPos(m_playlistLV, NULL, M, M, w - 2 * M, listH - 2 * M, SWP_NOZORDER);
+        // Search label + edit at top
+        HWND hSearchLabel = FindWindowExW(m_hwnd, NULL, L"STATIC", L"搜索:");
+        if (hSearchLabel) {
+            SetWindowPos(hSearchLabel, NULL, M, M, 40, searchH, SWP_NOZORDER);
+            SendMessageW(hSearchLabel, WM_SETFONT, (WPARAM)m_hFont, TRUE);
+        }
+        if (m_searchEdit) {
+            SetWindowPos(m_searchEdit, NULL, M + 42, M, w - 2 * M - 42, searchH, SWP_NOZORDER);
+            SendMessageW(m_searchEdit, WM_SETFONT, (WPARAM)m_hFont, TRUE);
+        }
+
+        int lvY = M + searchH + M;
+        SetWindowPos(m_playlistLV, NULL, M, lvY, w - 2 * M, listH, SWP_NOZORDER);
 
         int y = listH;
         const int BH = 28;
@@ -547,6 +570,8 @@ private:
                 else if (hCtrl == m_btnPrev) OnPrev();
                 else if (hCtrl == m_btnNext) OnNext();
                 else if (hCtrl == m_btnMode) OnCycleMode();
+            } else if (code == EN_CHANGE && hCtrl == m_searchEdit) {
+                OnSearchChanged();
             }
         }
     }
@@ -596,7 +621,9 @@ private:
                 }
                 case NM_DBLCLK: {
                     LPNMITEMACTIVATE ia = (LPNMITEMACTIVATE)lp;
-                    if (ia->iItem >= 0) PlayFile(ia->iItem);
+                    if (ia->iItem >= 0 && ia->iItem < (int)m_filterMap.size()) {
+                        PlayFile(m_filterMap[ia->iItem]);
+                    }
                     return 0;
                 }
             }
@@ -634,14 +661,14 @@ private:
         RefreshPlaylistUI();
 
         if (!curPath.empty()) {
+            m_currentIndex = -1;
             for (int i = 0; i < m_playlist.GetCount(); i++) {
                 if (m_playlist.GetFile(i) == curPath) {
                     m_currentIndex = i;
-                    ListView_SetItemState(m_playlistLV, i, LVIS_SELECTED | LVIS_FOCUSED,
-                                          LVIS_SELECTED | LVIS_FOCUSED);
                     break;
                 }
             }
+            UpdatePlaylistSelection();
         }
     }
 
@@ -903,6 +930,60 @@ private:
     }
 
     // ==========================================
+    // Search / Filter
+    // ==========================================
+    bool SearchMatches(int playlistIdx) {
+        const auto& song = m_playlist.GetSong(playlistIdx);
+        if (song.title.empty() && song.artist.empty() && song.album.empty())
+            return true;
+        // Get search text
+        if (!m_searchEdit) return true;
+        wchar_t searchBuf[256] = {};
+        GetWindowTextW(m_searchEdit, searchBuf, 256);
+        if (searchBuf[0] == L'\0') return true;
+
+        // Case-insensitive comparison
+        std::wstring q = searchBuf;
+        for (auto& c : q) c = towlower(c);
+
+        auto contains = [&](const std::wstring& s) -> bool {
+            std::wstring ls = s;
+            for (auto& c : ls) c = towlower(c);
+            return ls.find(q) != std::wstring::npos;
+        };
+
+        return contains(song.title) || contains(song.artist) || contains(song.album);
+    }
+
+    void RebuildFilter() {
+        m_filterMap.clear();
+        m_filterMap.reserve(m_playlist.GetCount());
+        for (int i = 0; i < m_playlist.GetCount(); i++) {
+            m_filterMap.push_back(i);
+        }
+        if (m_searchEdit) {
+            wchar_t searchBuf[256] = {};
+            GetWindowTextW(m_searchEdit, searchBuf, 256);
+            if (searchBuf[0] != L'\0') {
+                std::vector<int> filtered;
+                for (int idx : m_filterMap) {
+                    if (SearchMatches(idx)) filtered.push_back(idx);
+                }
+                m_filterMap.swap(filtered);
+            }
+        }
+    }
+
+    void OnSearchChanged() {
+        RebuildFilter();
+        RefreshPlaylistUI();
+        // Try to keep current song selected if visible
+        if (m_currentIndex >= 0) {
+            UpdatePlaylistSelection();
+        }
+    }
+
+    // ==========================================
     // Keyboard shortcuts
     // ==========================================
     bool HandleAccelerator(int vk) {
@@ -1155,7 +1236,10 @@ private:
         }
 
         m_playlist.UpdateMetadata(index, artist, title, L"", len);
-        UpdateLVItem(index);
+        // Find display index for this playlist index
+        for (int di = 0; di < (int)m_filterMap.size(); di++) {
+            if (m_filterMap[di] == index) { UpdateLVItem(di); break; }
+        }
 
         if (!meta.empty())
             SetWindowTextW(m_staticSong, (L"正在播放: " + meta).c_str());
@@ -1218,38 +1302,47 @@ private:
     }
 
     void UpdatePlaylistSelection() {
-        ListView_SetItemState(m_playlistLV, m_currentIndex,
-            LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-        ListView_EnsureVisible(m_playlistLV, m_currentIndex, FALSE);
+        int displayIdx = -1;
+        for (int i = 0; i < (int)m_filterMap.size(); i++) {
+            if (m_filterMap[i] == m_currentIndex) { displayIdx = i; break; }
+        }
+        if (displayIdx >= 0) {
+            ListView_SetItemState(m_playlistLV, displayIdx,
+                LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            ListView_EnsureVisible(m_playlistLV, displayIdx, FALSE);
+        }
     }
 
-    void UpdateLVItem(int index) {
-        if (index < 0 || index >= m_playlist.GetCount()) return;
-        const auto& song = m_playlist.GetSong(index);
+    void UpdateLVItem(int displayIdx) {
+        if (displayIdx < 0 || displayIdx >= (int)m_filterMap.size()) return;
+        int playlistIdx = m_filterMap[displayIdx];
+        const auto& song = m_playlist.GetSong(playlistIdx);
 
         wchar_t num[16];
-        swprintf(num, 16, L"%d", index + 1);
-        ListView_SetItemText(m_playlistLV, index, 0, num);
+        swprintf(num, 16, L"%d", displayIdx + 1);
+        ListView_SetItemText(m_playlistLV, displayIdx, 0, num);
 
         std::wstring display = song.title;
         if (!song.artist.empty())
             display = song.title + L" - " + song.artist;
-        ListView_SetItemText(m_playlistLV, index, 1, &display[0]);
+        ListView_SetItemText(m_playlistLV, displayIdx, 1, &display[0]);
 
         std::wstring alb = song.album.empty() ? L"" : song.album;
-        ListView_SetItemText(m_playlistLV, index, 2, &alb[0]);
+        ListView_SetItemText(m_playlistLV, displayIdx, 2, &alb[0]);
 
         std::wstring dur = FormatDuration(song.duration);
-        ListView_SetItemText(m_playlistLV, index, 3, &dur[0]);
+        ListView_SetItemText(m_playlistLV, displayIdx, 3, &dur[0]);
     }
 
     void RefreshPlaylistUI() {
         SendMessageW(m_playlistLV, WM_SETREDRAW, FALSE, 0);
         ListView_DeleteAllItems(m_playlistLV);
 
+        RebuildFilter();
+
         LVITEMW li = {};
         li.mask = LVIF_TEXT;
-        for (int i = 0; i < m_playlist.GetCount(); i++) {
+        for (int i = 0; i < (int)m_filterMap.size(); i++) {
             li.iItem = i;
             ListView_InsertItem(m_playlistLV, &li);
             UpdateLVItem(i);
@@ -1701,10 +1794,11 @@ private:
 };
 
 // ==========================================
-// Hotkey dialog procedure (minimal — unused, we handle everything inline)
+// Hotkey dialog procedure
 // ==========================================
-static INT_PTR CALLBACK HotkeyDlgProc(HWND, UINT, WPARAM, LPARAM) {
-    return FALSE;
+static LRESULT CALLBACK HotkeyDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_CLOSE) { DestroyWindow(hDlg); return 0; }
+    return DefWindowProcW(hDlg, msg, wp, lp);
 }
 
 // ==========================================

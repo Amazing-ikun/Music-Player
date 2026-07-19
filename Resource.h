@@ -2,6 +2,7 @@
 
 // Control IDs
 #define IDC_PLAYLIST        1001
+#define IDC_SEARCH_EDIT     1011
 #define IDC_BTN_PREV        1002
 #define IDC_BTN_PLAY        1003
 #define IDC_BTN_NEXT        1004

@@ -1383,8 +1383,11 @@ private:
             while (*p) {
                 char* nl = strchr(p, '\n');
                 if (!nl) nl = p + strlen(p);
-                char saved = *nl;
-                *nl = '\0';
+                // Strip \r before \n
+                char* end = nl;
+                while (end > p && *(end - 1) == '\r') --end;
+                char saved = *end;
+                *end = '\0';
                 if (strncmp(p, "hk_", 3) == 0) {
                     char* eq = strchr(p, '=');
                     if (eq) {
@@ -1408,7 +1411,7 @@ private:
                         }
                     }
                 }
-                *nl = saved;
+                *end = saved;
                 p = nl + 1;
             }
         }

@@ -68,6 +68,11 @@ static std::wstring GetExeDirectory() {
 static const wchar_t* COL_LABELS[4] = { L"#", L"标题", L"专辑", L"时长" };
 static const int COL_WIDTHS[4] = { 40, 280, 180, 80 };
 
+// Hotkey key names by array position (0-6)
+static const char* HK_KEY_NAMES[7] = {
+    "playpause", "prev", "next", "volup", "voldn", "restore", "minimize"
+};
+
 // ==========================================
 // HotkeyBinding - 单个快捷键配置
 // ==========================================
@@ -1324,7 +1329,6 @@ private:
     // ==========================================
     // Hotkey bindings persistence
     // ==========================================
-    // ==========================================
     // Hotkey bindings persistence (.hotkeys.txt) - ANSI
     // ==========================================
     void SaveHotkeyBindings() {
@@ -1336,36 +1340,10 @@ private:
         for (int i = 0; i < m_hotkeyCount; i++) {
             std::wstring code = BindingToCode(m_hotkeys[i].vk, m_hotkeys[i].mod);
             char line[128];
-            char codeA[256];
-            sprintf(codeA, "%S", code.c_str());
-            sprintf(line, "hk_%s=%s\n", HKSettingKey(i), codeA);
+            sprintf(line, "hk_%s=%S\n", HK_KEY_NAMES[i], code.c_str());
             WriteFile(hFile, line, (DWORD)strlen(line), &written, NULL);
         }
         CloseHandle(hFile);
-    }
-
-    const char* HKSettingKey(int idx) {
-        switch (m_hotkeys[idx].id) {
-            case HKID_PLAYPAUSE: return "playpause";
-            case HKID_PREV:      return "prev";
-            case HKID_NEXT:      return "next";
-            case HKID_VOLUP:     return "volup";
-            case HKID_VOLDN:     return "voldn";
-            case HKID_RESTORE:   return "restore";
-            case HKID_MINIMIZE:  return "minimize";
-            default: return "unknown";
-        }
-    }
-
-    int HKIdFromKey(const char* key) {
-        if (strcmp(key, "playpause") == 0) return HKID_PLAYPAUSE;
-        if (strcmp(key, "prev") == 0)      return HKID_PREV;
-        if (strcmp(key, "next") == 0)      return HKID_NEXT;
-        if (strcmp(key, "volup") == 0)     return HKID_VOLUP;
-        if (strcmp(key, "voldn") == 0)     return HKID_VOLDN;
-        if (strcmp(key, "restore") == 0)   return HKID_RESTORE;
-        if (strcmp(key, "minimize") == 0)  return HKID_MINIMIZE;
-        return -1;
     }
 
     void LoadHotkeyBindings() {
@@ -1383,7 +1361,6 @@ private:
             while (*p) {
                 char* nl = strchr(p, '\n');
                 if (!nl) nl = p + strlen(p);
-                // Strip \r before \n
                 char* end = nl;
                 while (end > p && *(end - 1) == '\r') --end;
                 char saved = *end;
@@ -1394,19 +1371,17 @@ private:
                         *eq = '\0';
                         const char* keyName = p + 3;
                         const char* codeStr = eq + 1;
-                        int id = HKIdFromKey(keyName);
-                        if (id > 0) {
-                            wchar_t codeW[64];
-                            swprintf(codeW, 64, L"%S", codeStr);
-                            int vk, mod;
-                            if (CodeToBinding(codeW, vk, mod)) {
-                                for (int i = 0; i < m_hotkeyCount; i++) {
-                                    if (m_hotkeys[i].id == id) {
-                                        m_hotkeys[i].vk = vk;
-                                        m_hotkeys[i].mod = mod;
-                                        break;
-                                    }
+                        // Find position by key name
+                        for (int i = 0; i < m_hotkeyCount; i++) {
+                            if (strcmp(keyName, HK_KEY_NAMES[i]) == 0) {
+                                wchar_t codeW[64];
+                                swprintf(codeW, 64, L"%S", codeStr);
+                                int vk, mod;
+                                if (CodeToBinding(codeW, vk, mod)) {
+                                    m_hotkeys[i].vk = vk;
+                                    m_hotkeys[i].mod = mod;
                                 }
+                                break;
                             }
                         }
                     }

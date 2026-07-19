@@ -1009,7 +1009,9 @@ private:
 
     void OnGlobalHotkey(int id) {
         for (int i = 0; i < m_hotkeyCount; i++) {
-            if (m_hotkeys[i].id == id) { ExecuteHotkey(i); return; }
+            if (m_hotkeys[i].id == id || m_hotkeys[i].id + 1000 == id) {
+                ExecuteHotkey(i); return;
+            }
         }
     }
 
@@ -1341,10 +1343,17 @@ private:
         while (*p) {
             char* nl = strchr(p, '\n');
             if (!nl) nl = p + strlen(p);
-            *nl = '\0';
+
+            // Strip \r before \n
+            char* end = nl;
+            while (end > p && *(end - 1) == '\r') --end;
+
+            char saved = *end;
+            *end = '\0';
             if (strncmp(p, "hk_", 3) != 0) {
                 settings += p; settings += "\n";
             }
+            *end = saved;
             p = nl + 1;
         }
 
@@ -1407,7 +1416,13 @@ private:
             while (*p) {
                 char* nl = strchr(p, '\n');
                 if (!nl) nl = p + strlen(p);
-                *nl = '\0';
+
+                // Strip \r before \n
+                char* end = nl;
+                while (end > p && *(end - 1) == '\r') --end;
+
+                char saved = *end;
+                *end = '\0';
                 if (strncmp(p, "hk_", 3) == 0) {
                     char* eq = strchr(p, '=');
                     if (eq) {
@@ -1416,7 +1431,6 @@ private:
                         const char* codeStr = eq + 1;
                         int id = HKIdFromKey(keyName);
                         if (id > 0) {
-                            // Convert ANSI code string to wide
                             wchar_t codeW[64];
                             swprintf(codeW, 64, L"%S", codeStr);
                             int vk, mod;
@@ -1432,6 +1446,7 @@ private:
                         }
                     }
                 }
+                *end = saved;
                 p = nl + 1;
             }
         }

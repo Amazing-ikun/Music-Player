@@ -105,7 +105,7 @@ void PlaylistManager::AddFile(const std::wstring& filePath) {
     SongInfo info;
     info.filePath = filePath;
     info.duration = 0;
-    if (!ReadID3v1(filePath, info)) {
+    if (!ReadID3v1(filePath, info) || info.title.empty()) {
         info.title = GetDisplayNameFromPath(filePath);
     }
     m_songs.push_back(info);

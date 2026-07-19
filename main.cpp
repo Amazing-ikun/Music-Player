@@ -3,6 +3,8 @@
 #define _UNICODE
 #include <windows.h>
 #include <commctrl.h>
+#include <commdlg.h>
+#include <shellapi.h>
 #include <shlobj.h>
 #include <cstdio>
 #include <cstdlib>
@@ -78,6 +80,7 @@ public:
         , m_sortColumn(-1), m_sortAscending(true)
         , m_shufflePos(0)
         , m_settingsAutoplay(true), m_settingsRememberProgress(true)
+        , m_settingsTray(true), m_trayIconAdded(false)
     {
         srand((unsigned)time(NULL));
     }
@@ -139,6 +142,8 @@ private:
     // ---- Settings ----
     bool m_settingsAutoplay;
     bool m_settingsRememberProgress;
+    bool m_settingsTray;
+    bool m_trayIconAdded;
 
     HFONT m_hFont;
 
@@ -160,7 +165,7 @@ private:
         switch (msg) {
             case WM_CREATE:            OnCreate();                  return 0;
             case WM_DESTROY:           PostQuitMessage(0);          return 0;
-            case WM_CLOSE:             OnClose();                   return 0;
+            case WM_CLOSE:             OnCloseRequest();            return 0;
             case WM_SIZE:              OnSize(LOWORD(lp), HIWORD(lp)); return 0;
             case WM_GETMINMAXINFO:     OnMinMaxInfo((MINMAXINFO*)lp);  return 0;
             case WM_COMMAND:           OnCommand(wp, lp);            return 0;
@@ -169,13 +174,11 @@ private:
             case WM_NOTIFY:            return OnNotify(wp, lp);
             default:
                 if (msg == WM_USER_SONG_END) { OnSongEnd(); return 0; }
+                if (msg == WM_APP_TRAY) { HandleTrayMessage(wp, lp); return 0; }
                 return DefWindowProcW(m_hwnd, msg, wp, lp);
         }
     }
 
-    // ==========================================
-    // OnCreate
-    // ==========================================
     void OnCreate() {
         INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_WIN95_CLASSES };
         InitCommonControlsEx(&icc);
@@ -200,10 +203,8 @@ private:
         LoadVolume();
         m_audio.SetNotifyWindow(m_hwnd, WM_USER_SONG_END);
 
-        // Restore last song and position if enabled
         if (m_settingsRememberProgress && !m_playlist.IsEmpty()) {
             if (LoadLastSong()) {
-                // LoadLastSong already played the song and seeked if found
             } else if (m_settingsAutoplay && !m_playlist.IsEmpty()) {
                 PlayFile(0);
             }
@@ -214,10 +215,19 @@ private:
         UpdateUI();
     }
 
-    void OnClose() {
+    void OnCloseRequest() {
+        if (m_settingsTray) {
+            MinimizeToTray();
+        } else {
+            OnRealClose();
+        }
+    }
+
+    void OnRealClose() {
         SavePlaylist();
         SaveVolume();
         SaveSettings();
+        RemoveTrayIcon();
         m_audio.Cleanup();
         DestroyWindow(m_hwnd);
     }
@@ -230,6 +240,7 @@ private:
 
         HMENU fileMenu = CreatePopupMenu();
         AppendMenuW(fileMenu, MF_STRING, ID_FILE_OPENFOLDER, L"打开文件夹(&O)...");
+        AppendMenuW(fileMenu, MF_STRING, ID_FILE_ADDFILES, L"添加歌曲(&A)...");
         AppendMenuW(fileMenu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(fileMenu, MF_STRING, ID_FILE_EXIT, L"退出(&X)");
         AppendMenuW(bar, MF_POPUP, (UINT_PTR)fileMenu, L"文件(&F)");
@@ -239,6 +250,8 @@ private:
             L"启动后自动播放");
         AppendMenuW(settingsMenu, MF_STRING | MF_CHECKED, ID_SETTINGS_REMEMBER,
             L"记住播放进度");
+        AppendMenuW(settingsMenu, MF_STRING | MF_CHECKED, ID_SETTINGS_TRAY,
+            L"最小化到托盘");
         AppendMenuW(bar, MF_POPUP, (UINT_PTR)settingsMenu, L"设置(&S)");
 
         HMENU playMenu = CreatePopupMenu();
@@ -250,15 +263,11 @@ private:
         SetMenu(m_hwnd, bar);
     }
 
-    // ==========================================
-    // Create controls
-    // ==========================================
     void CreateControls() {
         NONCLIENTMETRICSW ncm = { sizeof(ncm) };
         SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
         m_hFont = CreateFontIndirectW(&ncm.lfMenuFont);
 
-        // ---- Playlist (ListView) ----
         m_playlistLV = CreateWindowExW(0, WC_LISTVIEWW, NULL,
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER |
             LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL,
@@ -279,7 +288,6 @@ private:
             ListView_InsertColumn(m_playlistLV, i, &lc);
         }
 
-        // ---- Control buttons ----
         m_btnMode = CreateWindowExW(0, L"BUTTON", L"顺序播放",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             0, 0, 0, 0, m_hwnd, (HMENU)IDC_BTN_MODE, m_hInst, NULL);
@@ -293,7 +301,6 @@ private:
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             0, 0, 0, 0, m_hwnd, (HMENU)IDC_BTN_NEXT, m_hInst, NULL);
 
-        // ---- Volume slider + percentage label ----
         m_staticVolPct = CreateWindowExW(0, L"STATIC", L"80%",
             WS_CHILD | WS_VISIBLE | SS_CENTER,
             0, 0, 0, 0, m_hwnd, (HMENU)IDC_STAT_VOL, m_hInst, NULL);
@@ -305,7 +312,6 @@ private:
         SendMessageW(m_sliderVol, TBM_SETPOS, TRUE, 80);
         SendMessageW(m_sliderVol, TBM_SETPAGESIZE, 0, 10);
 
-        // ---- Seek ----
         m_trackSeek = CreateWindowExW(0, TRACKBAR_CLASSW, NULL,
             WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_FIXEDLENGTH | TBS_NOTICKS,
             0, 0, 0, 0, m_hwnd, (HMENU)IDC_TRACK_SEEK, m_hInst, NULL);
@@ -313,7 +319,6 @@ private:
         SendMessageW(m_trackSeek, TBM_SETPOS, TRUE, 0);
         SendMessageW(m_trackSeek, TBM_SETPAGESIZE, 0, SEEK_RES / 20);
 
-        // ---- Status ----
         m_staticTime = CreateWindowExW(0, L"STATIC", L"00:00 / 00:00",
             WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
             m_hwnd, (HMENU)IDC_STAT_TIME, m_hInst, NULL);
@@ -330,9 +335,6 @@ private:
         LayoutControls();
     }
 
-    // ==========================================
-    // Layout
-    // ==========================================
     void LayoutControls() {
         RECT rc;
         GetClientRect(m_hwnd, &rc);
@@ -398,7 +400,8 @@ private:
         if (hCtrl == NULL) {
             switch (id) {
                 case ID_FILE_OPENFOLDER: OpenFolder(); break;
-                case ID_FILE_EXIT:       SendMessageW(m_hwnd, WM_CLOSE, 0, 0); break;
+                case ID_FILE_ADDFILES:   AddFiles();   break;
+                case ID_FILE_EXIT:       OnRealClose(); break;
                 case ID_SETTINGS_AUTOPLAY:
                     m_settingsAutoplay = !m_settingsAutoplay;
                     UpdateSettingsMenu();
@@ -407,11 +410,25 @@ private:
                     m_settingsRememberProgress = !m_settingsRememberProgress;
                     UpdateSettingsMenu();
                     break;
+                case ID_SETTINGS_TRAY:
+                    m_settingsTray = !m_settingsTray;
+                    UpdateSettingsMenu();
+                    if (!m_settingsTray) RemoveTrayIcon();
+                    break;
                 case ID_PLAY_SEQUENTIAL: SetPlayMode(PlayMode::Sequential); break;
                 case ID_PLAY_REPEATONE:  SetPlayMode(PlayMode::RepeatOne);  break;
                 case ID_PLAY_SHUFFLE:
                     SetPlayMode(PlayMode::Shuffle);
                     Reshuffle();
+                    break;
+                case ID_TRAY_RESTORE:
+                    ShowWindow(m_hwnd, SW_RESTORE);
+                    SetForegroundWindow(m_hwnd);
+                    RemoveTrayIcon();
+                    break;
+                case ID_TRAY_EXIT:
+                    m_settingsTray = false;
+                    OnRealClose();
                     break;
             }
         } else {
@@ -609,7 +626,6 @@ private:
             m_playlist.ScanFolder(path);
             RefreshPlaylistUI();
 
-            // Reset shuffle order
             if (m_shuffleOrder.size() != (size_t)m_playlist.GetCount())
                 Reshuffle();
 
@@ -626,6 +642,73 @@ private:
     // ==========================================
     // Playback controls
     // ==========================================
+    // ==========================================
+    // Add files from multi-file dialog
+    // ==========================================
+    void AddFiles() {
+        wchar_t buf[65536];
+        buf[0] = L'0';
+
+        OPENFILENAMEW ofn = {};
+        ofn.lStructSize     = sizeof(ofn);
+        ofn.hwndOwner       = m_hwnd;
+        ofn.lpstrFile       = buf;
+        ofn.nMaxFile        = 65536;
+        ofn.lpstrFilter     = L"音频文件 (*.mp3;*.flac;*.wav)0*.mp3;*.flac;*.wav0所有文件 (*.*)0*.*0";
+        ofn.nFilterIndex    = 1;
+        ofn.Flags           = OFN_ALLOWMULTISELECT | OFN_EXPLORER |
+                              OFN_HIDEREADONLY | OFN_FILEMUSTEXIST |
+                              OFN_LONGNAMES | OFN_NOCHANGEDIR;
+
+        if (!GetOpenFileNameW(&ofn)) return;
+
+        std::wstring dir = buf;
+        size_t offset = dir.size() + 1;
+        bool added = false;
+        bool hadItems = !m_playlist.IsEmpty();
+
+        if (buf[offset] == L'0') {
+            std::wstring ext;
+            const wchar_t* dot = wcsrchr(buf, L'.');
+            if (dot) ext = dot;
+            if (PlaylistManager::IsAudioExtension(ext)) {
+                m_playlist.AddFile(buf);
+                added = true;
+            }
+        } else {
+            while (buf[offset] != L'0') {
+                std::wstring fullPath = dir + L"\\" + (buf + offset);
+                std::wstring ext;
+                const wchar_t* dot = wcsrchr(buf + offset, L'.');
+                if (dot) ext = dot;
+                if (PlaylistManager::IsAudioExtension(ext)) {
+                    bool dup = false;
+                    for (int i = 0; i < m_playlist.GetCount(); i++) {
+                        if (m_playlist.GetFile(i) == fullPath) { dup = true; break; }
+                    }
+                    if (!dup) {
+                        m_playlist.AddFile(fullPath);
+                        added = true;
+                    }
+                }
+                offset += wcslen(buf + offset) + 1;
+            }
+        }
+
+        if (added) {
+            RefreshPlaylistUI();
+            if (m_audio.GetPlayMode() == PlayMode::Shuffle)
+                Reshuffle();
+            if (!hadItems) {
+                PlayFile(0);
+            } else {
+                SetWindowTextW(m_staticSong,
+                    (L"已添加 " + std::to_wstring(m_playlist.GetCount()) + L" 首歌曲").c_str());
+                UpdateUI();
+            }
+        }
+    }
+
     void OnPlayPause() {
         if (!m_audio.IsLoaded()) return;
         if (m_audio.IsPlaying()) {
@@ -708,6 +791,8 @@ private:
             MF_BYCOMMAND | (m_settingsAutoplay ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(settingsMenu, ID_SETTINGS_REMEMBER,
             MF_BYCOMMAND | (m_settingsRememberProgress ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(settingsMenu, ID_SETTINGS_TRAY,
+            MF_BYCOMMAND | (m_settingsTray ? MF_CHECKED : MF_UNCHECKED));
     }
 
     // ==========================================
@@ -750,7 +835,6 @@ private:
 
         SetTimer(m_hwnd, TIMER_ID_SEEK, 500, NULL);
 
-        // Save last song info for restoration on next launch
         if (m_settingsRememberProgress) {
             SaveLastSong();
         }
@@ -856,7 +940,7 @@ private:
     }
 
     // ==========================================
-    // Settings persistence (.settings.txt) - ANSI
+    // Settings persistence (.settings.txt)
     // ==========================================
     void SaveSettings() {
         std::wstring filePath = GetExeDirectory() + L"\\.settings.txt";
@@ -865,9 +949,10 @@ private:
         if (hFile == INVALID_HANDLE_VALUE) return;
         DWORD written;
         char buf[128];
-        int len = sprintf(buf, "autoplay=%d\nremember_progress=%d\n",
+        int len = sprintf(buf, "autoplay=%d\nremember_progress=%d\ntray_minimize=%d\n",
                           m_settingsAutoplay ? 1 : 0,
-                          m_settingsRememberProgress ? 1 : 0);
+                          m_settingsRememberProgress ? 1 : 0,
+                          m_settingsTray ? 1 : 0);
         WriteFile(hFile, buf, len, &written, NULL);
         CloseHandle(hFile);
     }
@@ -890,6 +975,7 @@ private:
                 *nl = '\0';
                 if (sscanf(p, "autoplay=%d", &m_settingsAutoplay) == 1) {}
                 else if (sscanf(p, "remember_progress=%d", &m_settingsRememberProgress) == 1) {}
+                else if (sscanf(p, "tray_minimize=%d", &m_settingsTray) == 1) {}
                 p = nl + 1;
             }
         }
@@ -897,7 +983,57 @@ private:
     }
 
     // ==========================================
-    // Last song progress (.lastsong.txt) - UTF-16LE
+    // Tray icon
+    // ==========================================
+    void AddTrayIcon() {
+        if (m_trayIconAdded) return;
+        NOTIFYICONDATAW nid = {};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = m_hwnd;
+        nid.uID = 1;
+        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        nid.uCallbackMessage = WM_APP_TRAY;
+        nid.hIcon = LoadIconW(m_hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
+        wcscpy(nid.szTip, WINDOW_TITLE);
+        Shell_NotifyIconW(NIM_ADD, &nid);
+        m_trayIconAdded = true;
+    }
+
+    void RemoveTrayIcon() {
+        if (!m_trayIconAdded) return;
+        NOTIFYICONDATAW nid = {};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = m_hwnd;
+        nid.uID = 1;
+        Shell_NotifyIconW(NIM_DELETE, &nid);
+        m_trayIconAdded = false;
+    }
+
+    void MinimizeToTray() {
+        AddTrayIcon();
+        ShowWindow(m_hwnd, SW_HIDE);
+    }
+
+    void HandleTrayMessage(WPARAM, LPARAM lp) {
+        if (LOWORD(lp) == WM_LBUTTONDBLCLK) {
+            ShowWindow(m_hwnd, SW_RESTORE);
+            SetForegroundWindow(m_hwnd);
+            RemoveTrayIcon();
+        } else if (LOWORD(lp) == WM_RBUTTONDOWN) {
+            HMENU popup = CreatePopupMenu();
+            AppendMenuW(popup, MF_STRING, ID_TRAY_RESTORE, L"恢复");
+            AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
+            AppendMenuW(popup, MF_STRING, ID_TRAY_EXIT, L"退出");
+            POINT pt;
+            GetCursorPos(&pt);
+            SetForegroundWindow(m_hwnd);
+            TrackPopupMenu(popup, TPM_RIGHTBUTTON, pt.x, pt.y, 0, m_hwnd, NULL);
+            DestroyMenu(popup);
+        }
+    }
+
+    // ==========================================
+    // Last song progress (.lastsong.txt)
     // ==========================================
     void SaveLastSong() {
         if (m_currentIndex < 0 || !m_audio.IsLoaded()) return;
@@ -942,25 +1078,21 @@ private:
             const wchar_t* p = buf.c_str();
             if (*p == 0xFEFF) p++;
 
-            // Line 1: index
             const wchar_t* nl1 = wcschr(p, L'\n');
             if (!nl1) return false;
             int savedIndex = _wtoi(std::wstring(p, nl1 - p).c_str());
             p = nl1 + 1;
 
-            // Line 2: position
             const wchar_t* nl2 = wcschr(p, L'\n');
             if (!nl2) return false;
             double savedPos = _wtof(std::wstring(p, nl2 - p).c_str());
             p = nl2 + 1;
 
-            // Line 3: file path
             const wchar_t* nl3 = wcschr(p, L'\n');
             size_t pathLen = nl3 ? (size_t)(nl3 - p) : wcslen(p);
             if (pathLen > 0 && p[pathLen-1] == L'\r') --pathLen;
             std::wstring savedPath(p, pathLen);
 
-            // Find the song in current playlist by path
             if (!savedPath.empty()) {
                 for (int i = 0; i < m_playlist.GetCount(); i++) {
                     if (m_playlist.GetFile(i) == savedPath) {
@@ -974,7 +1106,6 @@ private:
                 }
             }
 
-            // If path not found but index is valid, use index
             if (!loaded && savedIndex >= 0 && savedIndex < m_playlist.GetCount()) {
                 PlayFile(savedIndex);
                 if (savedPos > 0) {
@@ -1132,9 +1263,6 @@ private:
     }
 };
 
-// ============================================
-// WinMain
-// ============================================
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     InitCommonControls();

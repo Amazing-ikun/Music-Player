@@ -43,8 +43,8 @@ void PlaylistManager::ScanDirectory(const std::wstring& dirPath) {
                 SongInfo info;
                 info.filePath = fullPath;
                 info.duration = 0;
-                // 快速读取ID3v1标签, 失败时回退到文件名
-                if (!ReadID3v1(fullPath, info)) {
+                // 快速读取ID3v1标签, 失败或标题为空时回退到文件名
+                if (!ReadID3v1(fullPath, info) || info.title.empty()) {
                     info.title = GetDisplayNameFromPath(fullPath);
                 }
                 m_songs.push_back(info);

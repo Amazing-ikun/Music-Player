@@ -2,9 +2,7 @@
 #include <cstring>
 #pragma warning(disable : 4996)
 
-// ============================================
 // 构造函数
-// ============================================
 AudioEngine::AudioEngine()
     : m_stream(0)
     , m_endSync(0)
@@ -17,16 +15,12 @@ AudioEngine::AudioEngine()
 {
 }
 
-// ============================================
 // 析构函数
-// ============================================
 AudioEngine::~AudioEngine() {
     Cleanup();
 }
 
-// ============================================
-// 初始化 BASS 音频引擎
-// ============================================
+// 初始化 BASS 音频引擎=
 bool AudioEngine::Initialize(HWND hwnd) {
     // 使用默认音频设备，44.1kHz采样率
     if (!BASS_Init(-1, 44100, 0, hwnd, NULL)) {
@@ -37,9 +31,7 @@ bool AudioEngine::Initialize(HWND hwnd) {
     return true;
 }
 
-// ============================================
 // 清理 BASS 资源
-// ============================================
 void AudioEngine::Cleanup() {
     Stop();
     if (m_stream) {
@@ -49,9 +41,7 @@ void AudioEngine::Cleanup() {
     BASS_Free();
 }
 
-// ============================================
 // 加载音频文件（流式解码，不加载到内存）
-// ============================================
 bool AudioEngine::Load(const std::wstring& filePath) {
     Stop();
 
@@ -80,9 +70,7 @@ bool AudioEngine::Load(const std::wstring& filePath) {
     return true;
 }
 
-// ============================================
 // 卸载当前文件
-// ============================================
 void AudioEngine::Unload() {
     Stop();
     if (m_stream) {
@@ -91,9 +79,7 @@ void AudioEngine::Unload() {
     }
 }
 
-// ============================================
 // 播放
-// ============================================
 void AudioEngine::Play() {
     if (!m_stream) return;
     BASS_ChannelPlay(m_stream, FALSE);
@@ -101,9 +87,7 @@ void AudioEngine::Play() {
     m_paused = false;
 }
 
-// ============================================
 // 暂停
-// ============================================
 void AudioEngine::Pause() {
     if (!m_stream) return;
     BASS_ChannelPause(m_stream);
@@ -111,9 +95,7 @@ void AudioEngine::Pause() {
     m_paused = true;
 }
 
-// ============================================
 // 停止
-// ============================================
 void AudioEngine::Stop() {
     if (!m_stream) return;
     BASS_ChannelStop(m_stream);
@@ -121,9 +103,7 @@ void AudioEngine::Stop() {
     m_paused = false;
 }
 
-// ============================================
 // 音量控制 0-100
-// ============================================
 void AudioEngine::SetVolume(int volume) {
     m_volume = volume < 0 ? 0 : (volume > 100 ? 100 : volume);
     BASS_SetConfig(BASS_CONFIG_GVOL_STREAM, (DWORD)(100 * m_volume));
@@ -132,9 +112,7 @@ void AudioEngine::SetVolume(int volume) {
     }
 }
 
-// ============================================
 // 获取当前播放位置（秒）
-// ============================================
 double AudioEngine::GetPosition() const {
     if (!m_stream) return 0.0;
     QWORD bytes = BASS_ChannelGetPosition(m_stream, BASS_POS_BYTE);
@@ -142,9 +120,7 @@ double AudioEngine::GetPosition() const {
     return BASS_ChannelBytes2Seconds(m_stream, bytes);
 }
 
-// ============================================
 // 获取音频总长度（秒）
-// ============================================
 double AudioEngine::GetLength() const {
     if (!m_stream) return 0.0;
     QWORD bytes = BASS_ChannelGetLength(m_stream, BASS_POS_BYTE);
@@ -152,18 +128,14 @@ double AudioEngine::GetLength() const {
     return BASS_ChannelBytes2Seconds(m_stream, bytes);
 }
 
-// ============================================
 // 跳转到指定位置（秒）
-// ============================================
 void AudioEngine::SetPosition(double seconds) {
     if (!m_stream) return;
     QWORD bytes = BASS_ChannelSeconds2Bytes(m_stream, seconds);
     BASS_ChannelSetPosition(m_stream, bytes, BASS_POS_BYTE);
 }
 
-// ============================================
 // 循环切换播放模式
-// ============================================
 PlayMode AudioEngine::CyclePlayMode() {
     switch (m_playMode) {
         case PlayMode::Sequential: m_playMode = PlayMode::RepeatOne; break;
@@ -173,9 +145,7 @@ PlayMode AudioEngine::CyclePlayMode() {
     return m_playMode;
 }
 
-// ============================================
 // 读取音频元数据（延迟加载策略：只在播放时读取）
-// ============================================
 std::wstring AudioEngine::GetFormattedMetadata() const {
     if (!m_stream) return L"";
 
@@ -248,20 +218,16 @@ std::wstring AudioEngine::GetFormattedMetadata() const {
     return L"";
 }
 
-// ============================================
 // 通知：歌曲已播放结束（AUTOFREE已释放流）
 // 由主窗口在收到 WM_USER_SONG_END 时调用
-// ============================================
 void AudioEngine::NotifyEndOfSong() {
     m_stream = 0;   // AUTOFREE 已释放
     m_playing = false;
     m_paused = false;
 }
 
-// ============================================
 // 静态回调：BASS 播放结束同步
 // 在线程上下文中调用，仅做 PostMessage
-// ============================================
 void CALLBACK AudioEngine::EndSyncProc(HSYNC /*handle*/, DWORD /*channel*/,
                                         DWORD /*data*/, void* user) {
     AudioEngine* engine = static_cast<AudioEngine*>(user);

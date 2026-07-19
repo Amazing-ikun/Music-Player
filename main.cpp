@@ -85,7 +85,6 @@ public:
         , m_staticTime(NULL), m_staticSong(NULL)
         , m_currentIndex(-1), m_userDraggingSeek(false)
         , m_sortColumn(-1), m_sortAscending(true)
-        , m_hFontSmall(NULL)
     {
         srand((unsigned)time(NULL));
     }
@@ -141,9 +140,7 @@ private:
     bool             m_userDraggingSeek;
     int              m_sortColumn;
     bool             m_sortAscending;
-    HFONT            m_hFontSmall;
 
-    // ---- Font ----
     HFONT m_hFont;
 
     static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -235,9 +232,6 @@ private:
         NONCLIENTMETRICSW ncm = { sizeof(ncm) };
         SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
         m_hFont = CreateFontIndirectW(&ncm.lfMenuFont);
-        m_hFontSmall = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"微软雅黑");
 
         // ---- Playlist (ListView) ----
         m_playlistLV = CreateWindowExW(0, WC_LISTVIEWW, NULL,
@@ -437,11 +431,7 @@ private:
 
         if (nmh->hwndFrom == m_playlistLV) {
             switch (nmh->code) {
-                case NM_CUSTOMDRAW: {
-                    LPNMLVCUSTOMDRAW cd = (LPNMLVCUSTOMDRAW)lp;
-                    return OnLVCustomDraw(cd);
-                }
-                case LVN_COLUMNCLICK: {
+                    case LVN_COLUMNCLICK: {
                     LPNMLISTVIEW lv = (LPNMLISTVIEW)lp;
                     OnLVColumnClick(lv->iSubItem);
                     return 0;
@@ -459,62 +449,6 @@ private:
     // ==========================================
     // ListView custom draw (title + artist two-line)
     // ==========================================
-    LRESULT OnLVCustomDraw(LPNMLVCUSTOMDRAW cd) {
-        switch (cd->nmcd.dwDrawStage) {
-            case CDDS_PREPAINT:
-                return CDRF_NOTIFYITEMDRAW;
-            case CDDS_ITEMPREPAINT:
-                return CDRF_NOTIFYSUBITEMDRAW;
-            case (CDDS_ITEMPREPAINT | CDDS_SUBITEM):
-                if (cd->iSubItem == 1) {
-                    int iItem = (int)cd->nmcd.dwItemSpec;
-                    if (iItem >= 0 && iItem < m_playlist.GetCount()) {
-                        const auto& song = m_playlist.GetSong(iItem);
-                        HDC dc = cd->nmcd.hdc;
-                        RECT rc = cd->nmcd.rc;
-                        RECT rcClip;
-                        GetClipBox(dc, &rcClip);
-
-                        // Background
-                        bool sel = (cd->nmcd.uItemState & CDIS_SELECTED);
-                        if (sel) {
-                            FillRect(dc, &rc, GetSysColorBrush(COLOR_HIGHLIGHT));
-                            SetTextColor(dc, GetSysColor(COLOR_HIGHLIGHTTEXT));
-                        } else {
-                            FillRect(dc, &rc, GetSysColorBrush(COLOR_WINDOW));
-                            SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
-                        }
-
-                        SetBkMode(dc, TRANSPARENT);
-                        rc.left += 6;
-
-                        // Title
-                        HFONT old = (HFONT)SelectObject(dc, m_hFont);
-                        RECT rcT = rc;
-                        rcT.bottom = rc.top + 20;
-                        DrawTextW(dc, song.title.c_str(), -1, &rcT,
-                            DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-                        // Artist (smaller font, gray text)
-                        if (!song.artist.empty()) {
-                            SelectObject(dc, m_hFontSmall);
-                            if (!sel) SetTextColor(dc, RGB(120, 120, 120));
-                            RECT rcA = rc;
-                            rcA.top = rc.top + 20;
-                            DrawTextW(dc, song.artist.c_str(), -1, &rcA,
-                                DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
-                            if (!sel) SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
-                        }
-
-                        SelectObject(dc, old);
-                        return CDRF_SKIPDEFAULT;
-                    }
-                }
-                return CDRF_DODEFAULT;
-        }
-        return CDRF_DODEFAULT;
-    }
-
     // ==========================================
     // ListView column click sorting
     // ==========================================
@@ -806,7 +740,7 @@ private:
         swprintf(num, 16, L"%d", index + 1);
         ListView_SetItemText(m_playlistLV, index, 0, num);
 
-        // Title column (custom drawn, but set text for accessibility)
+        // Title column: "Title - Artist"
         std::wstring display = song.title;
         if (!song.artist.empty())
             display = song.title + L" - " + song.artist;

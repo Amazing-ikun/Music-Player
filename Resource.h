@@ -35,3 +35,12 @@
 
 // Resource IDs
 #define IDI_APP_ICON        101
+
+// Hotkey IDs
+#define HKID_PLAYPAUSE  4001
+#define HKID_PREV       4002
+#define HKID_NEXT       4003
+#define HKID_VOLUP      4004
+#define HKID_VOLDN      4005
+#define HKID_RESTORE    4006
+#define HKID_MINIMIZE   4007

@@ -162,6 +162,10 @@ private:
     }
 
     LRESULT HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
+        // In-app keyboard shortcuts (Ctrl+key)
+        if (msg == WM_KEYDOWN && (GetAsyncKeyState(VK_CONTROL) & 0x8000)) {
+            if (HandleAccelerator((int)wp)) return 0;
+        }
         switch (msg) {
             case WM_CREATE:            OnCreate();                  return 0;
             case WM_DESTROY:           PostQuitMessage(0);          return 0;
@@ -171,6 +175,7 @@ private:
             case WM_COMMAND:           OnCommand(wp, lp);            return 0;
             case WM_HSCROLL:           OnHScroll(wp, lp);            return 0;
             case WM_TIMER:             if (wp == TIMER_ID_SEEK) OnTimer(); return 0;
+            case WM_HOTKEY:            OnGlobalHotkey((int)wp);  return 0;
             case WM_NOTIFY:            return OnNotify(wp, lp);
             default:
                 if (msg == WM_USER_SONG_END) { OnSongEnd(); return 0; }
@@ -212,6 +217,7 @@ private:
             PlayFile(0);
         }
 
+        RegisterHotKeys();
         UpdateUI();
     }
 
@@ -227,6 +233,7 @@ private:
         SavePlaylist();
         SaveVolume();
         SaveSettings();
+        UnregisterHotKeys();
         RemoveTrayIcon();
         m_audio.Cleanup();
         DestroyWindow(m_hwnd);
@@ -714,15 +721,24 @@ private:
         if (m_audio.IsPlaying()) {
             m_audio.Pause();
             SetWindowTextW(m_staticSong, L"已暂停");
+            std::wstring tipText;
+            if (m_currentIndex >= 0 && m_currentIndex < m_playlist.GetCount()) {
+                std::wstring meta = m_audio.GetFormattedMetadata();
+                tipText = meta.empty() ? GetDisplayName(m_playlist.GetFile(m_currentIndex)) : meta;
+            }
+            UpdateTrayTip(L"已暂停: " + tipText);
         } else {
             m_audio.Play();
             if (m_currentIndex >= 0 && m_currentIndex < m_playlist.GetCount()) {
                 std::wstring meta = m_audio.GetFormattedMetadata();
                 const auto& path = m_playlist.GetFile(m_currentIndex);
-                if (!meta.empty())
+                if (!meta.empty()) {
                     SetWindowTextW(m_staticSong, (L"正在播放: " + meta).c_str());
-                else
+                    UpdateTrayTip(L"正在播放: " + meta);
+                } else {
                     SetWindowTextW(m_staticSong, (L"正在播放: " + GetDisplayName(path)).c_str());
+                    UpdateTrayTip(L"正在播放: " + GetDisplayName(path));
+                }
             }
             SetTimer(m_hwnd, TIMER_ID_SEEK, 500, NULL);
         }
@@ -796,6 +812,65 @@ private:
     }
 
     // ==========================================
+    // Keyboard shortcuts
+    // ==========================================
+    bool HandleAccelerator(int vk) {
+        switch (vk) {
+            case 'P': OnPlayPause();       return true;
+            case VK_LEFT:  OnPrev();       return true;
+            case VK_RIGHT: OnNext();       return true;
+            case VK_UP:    AdjustVolume(5);   return true;
+            case VK_DOWN:  AdjustVolume(-5);  return true;
+            case 'O': ShowWindow(m_hwnd, SW_RESTORE); SetForegroundWindow(m_hwnd); RemoveTrayIcon(); return true;
+            case 'K': MinimizeToTray();    return true;
+        }
+        return false;
+    }
+
+    void OnGlobalHotkey(int id) {
+        switch (id) {
+            case HKID_PLAYPAUSE: OnPlayPause();  break;
+            case HKID_PREV:      OnPrev();        break;
+            case HKID_NEXT:      OnNext();        break;
+            case HKID_VOLUP:     AdjustVolume(5);   break;
+            case HKID_VOLDN:     AdjustVolume(-5);  break;
+            case HKID_RESTORE:   ShowWindow(m_hwnd, SW_RESTORE); SetForegroundWindow(m_hwnd); RemoveTrayIcon(); break;
+            case HKID_MINIMIZE:  MinimizeToTray(); break;
+        }
+    }
+
+    void RegisterHotKeys() {
+        HWND h = m_hwnd;
+        RegisterHotKey(h, HKID_PLAYPAUSE, MOD_CONTROL | MOD_ALT, 'P');
+        RegisterHotKey(h, HKID_PREV,      MOD_CONTROL | MOD_ALT, VK_LEFT);
+        RegisterHotKey(h, HKID_NEXT,      MOD_CONTROL | MOD_ALT, VK_RIGHT);
+        RegisterHotKey(h, HKID_VOLUP,     MOD_CONTROL | MOD_ALT, VK_UP);
+        RegisterHotKey(h, HKID_VOLDN,     MOD_CONTROL | MOD_ALT, VK_DOWN);
+        RegisterHotKey(h, HKID_RESTORE,   MOD_CONTROL | MOD_ALT, 'O');
+        RegisterHotKey(h, HKID_MINIMIZE,  MOD_CONTROL | MOD_ALT, 'K');
+    }
+
+    void UnregisterHotKeys() {
+        HWND h = m_hwnd;
+        UnregisterHotKey(h, HKID_PLAYPAUSE);
+        UnregisterHotKey(h, HKID_PREV);
+        UnregisterHotKey(h, HKID_NEXT);
+        UnregisterHotKey(h, HKID_VOLUP);
+        UnregisterHotKey(h, HKID_VOLDN);
+        UnregisterHotKey(h, HKID_RESTORE);
+        UnregisterHotKey(h, HKID_MINIMIZE);
+    }
+
+    void AdjustVolume(int delta) {
+        int vol = (int)SendMessageW(m_sliderVol, TBM_GETPOS, 0, 0) + delta;
+        if (vol < 0) vol = 0;
+        if (vol > 100) vol = 100;
+        m_audio.SetVolume(vol);
+        SendMessageW(m_sliderVol, TBM_SETPOS, TRUE, vol);
+        UpdateVolLabel();
+    }
+
+    // ==========================================
     // Play file
     // ==========================================
     void PlayFile(int index) {
@@ -834,6 +909,10 @@ private:
             SetWindowTextW(m_staticSong, (L"正在播放: " + GetDisplayName(path)).c_str());
 
         SetTimer(m_hwnd, TIMER_ID_SEEK, 500, NULL);
+
+        // Update tray tooltip
+        std::wstring tipText = meta.empty() ? GetDisplayName(path) : meta;
+        UpdateTrayTip(L"正在播放: " + tipText);
 
         if (m_settingsRememberProgress) {
             SaveLastSong();
@@ -1007,6 +1086,17 @@ private:
         nid.uID = 1;
         Shell_NotifyIconW(NIM_DELETE, &nid);
         m_trayIconAdded = false;
+    }
+
+    void UpdateTrayTip(const std::wstring& text) {
+        if (!m_trayIconAdded) return;
+        NOTIFYICONDATAW nid = {};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = m_hwnd;
+        nid.uID = 1;
+        nid.uFlags = NIF_TIP;
+        wcsncpy(nid.szTip, text.c_str(), 127);
+        Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 
     void MinimizeToTray() {

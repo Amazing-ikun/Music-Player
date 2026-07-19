@@ -15,9 +15,6 @@
 #include "AudioEngine.h"
 #include "PlaylistManager.h"
 
-// ============================================
-// Constants
-// ============================================
 namespace {
     const wchar_t CLASS_NAME[]  = L"MusicPlayerClass";
     const wchar_t WINDOW_TITLE[] = L"本地音乐播放器";
@@ -66,15 +63,9 @@ static std::wstring GetExeDirectory() {
     return path;
 }
 
-// ============================================
-// Column header labels
-// ============================================
 static const wchar_t* COL_LABELS[4] = { L"#", L"标题", L"专辑", L"时长" };
 static const int COL_WIDTHS[4] = { 40, 280, 180, 80 };
 
-// ============================================
-// MainWindow
-// ============================================
 class MainWindow {
 public:
     MainWindow()
@@ -85,6 +76,8 @@ public:
         , m_staticTime(NULL), m_staticSong(NULL)
         , m_currentIndex(-1), m_userDraggingSeek(false)
         , m_sortColumn(-1), m_sortAscending(true)
+        , m_shufflePos(0)
+        , m_settingsAutoplay(true), m_settingsRememberProgress(true)
     {
         srand((unsigned)time(NULL));
     }
@@ -122,8 +115,6 @@ public:
         return true;
     }
 
-    HWND GetHWND() const { return m_hwnd; }
-
 private:
     // ---- Controls ----
     HWND m_hwnd;
@@ -140,6 +131,14 @@ private:
     bool             m_userDraggingSeek;
     int              m_sortColumn;
     bool             m_sortAscending;
+
+    // ---- Shuffle ----
+    std::vector<int> m_shuffleOrder;
+    int              m_shufflePos;
+
+    // ---- Settings ----
+    bool m_settingsAutoplay;
+    bool m_settingsRememberProgress;
 
     HFONT m_hFont;
 
@@ -191,17 +190,34 @@ private:
                 L"音频初始化失败", MB_OK | MB_ICONWARNING);
         }
 
+        LoadSettings();
+        UpdateSettingsMenu();
+
         if (!LoadFromLastFolder()) {
             LoadPlaylist();
         }
+
         LoadVolume();
         m_audio.SetNotifyWindow(m_hwnd, WM_USER_SONG_END);
+
+        // Restore last song and position if enabled
+        if (m_settingsRememberProgress && !m_playlist.IsEmpty()) {
+            if (LoadLastSong()) {
+                // LoadLastSong already played the song and seeked if found
+            } else if (m_settingsAutoplay && !m_playlist.IsEmpty()) {
+                PlayFile(0);
+            }
+        } else if (m_settingsAutoplay && !m_playlist.IsEmpty()) {
+            PlayFile(0);
+        }
+
         UpdateUI();
     }
 
     void OnClose() {
         SavePlaylist();
         SaveVolume();
+        SaveSettings();
         m_audio.Cleanup();
         DestroyWindow(m_hwnd);
     }
@@ -211,17 +227,26 @@ private:
     // ==========================================
     void CreateMenuBar() {
         HMENU bar = CreateMenu();
+
         HMENU fileMenu = CreatePopupMenu();
         AppendMenuW(fileMenu, MF_STRING, ID_FILE_OPENFOLDER, L"打开文件夹(&O)...");
         AppendMenuW(fileMenu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(fileMenu, MF_STRING, ID_FILE_EXIT, L"退出(&X)");
         AppendMenuW(bar, MF_POPUP, (UINT_PTR)fileMenu, L"文件(&F)");
 
+        HMENU settingsMenu = CreatePopupMenu();
+        AppendMenuW(settingsMenu, MF_STRING | MF_CHECKED, ID_SETTINGS_AUTOPLAY,
+            L"启动后自动播放");
+        AppendMenuW(settingsMenu, MF_STRING | MF_CHECKED, ID_SETTINGS_REMEMBER,
+            L"记住播放进度");
+        AppendMenuW(bar, MF_POPUP, (UINT_PTR)settingsMenu, L"设置(&S)");
+
         HMENU playMenu = CreatePopupMenu();
         AppendMenuW(playMenu, MF_STRING | MF_CHECKED, ID_PLAY_SEQUENTIAL, L"顺序播放(&S)");
         AppendMenuW(playMenu, MF_STRING, ID_PLAY_REPEATONE, L"单曲循环(&R)");
         AppendMenuW(playMenu, MF_STRING, ID_PLAY_SHUFFLE, L"随机播放(&H)");
         AppendMenuW(bar, MF_POPUP, (UINT_PTR)playMenu, L"播放(&P)");
+
         SetMenu(m_hwnd, bar);
     }
 
@@ -242,11 +267,9 @@ private:
         ListView_SetExtendedListViewStyle(m_playlistLV,
             LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT | LVS_EX_HEADERDRAGDROP);
 
-        // Set row height via empty image list
         HIMAGELIST himl = ImageList_Create(1, LV_ROW_HEIGHT, ILC_COLOR32, 1, 1);
         ListView_SetImageList(m_playlistLV, himl, LVSIL_SMALL);
 
-        // Create columns
         LVCOLUMNW lc = {};
         lc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
         lc.fmt  = LVCFMT_LEFT;
@@ -298,7 +321,6 @@ private:
             WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
             0, 0, 0, 0, m_hwnd, (HMENU)IDC_STAT_SONG, m_hInst, NULL);
 
-        // Apply font
         HWND ctls[] = { m_btnMode, m_btnPrev, m_btnPlay, m_btnNext,
                         m_sliderVol, m_trackSeek, m_staticVolPct,
                         m_staticTime, m_staticSong };
@@ -377,9 +399,20 @@ private:
             switch (id) {
                 case ID_FILE_OPENFOLDER: OpenFolder(); break;
                 case ID_FILE_EXIT:       SendMessageW(m_hwnd, WM_CLOSE, 0, 0); break;
+                case ID_SETTINGS_AUTOPLAY:
+                    m_settingsAutoplay = !m_settingsAutoplay;
+                    UpdateSettingsMenu();
+                    break;
+                case ID_SETTINGS_REMEMBER:
+                    m_settingsRememberProgress = !m_settingsRememberProgress;
+                    UpdateSettingsMenu();
+                    break;
                 case ID_PLAY_SEQUENTIAL: SetPlayMode(PlayMode::Sequential); break;
                 case ID_PLAY_REPEATONE:  SetPlayMode(PlayMode::RepeatOne);  break;
-                case ID_PLAY_SHUFFLE:    SetPlayMode(PlayMode::Shuffle);    break;
+                case ID_PLAY_SHUFFLE:
+                    SetPlayMode(PlayMode::Shuffle);
+                    Reshuffle();
+                    break;
             }
         } else {
             WORD code = HIWORD(wp);
@@ -424,14 +457,13 @@ private:
     }
 
     // ==========================================
-    // WM_NOTIFY (ListView events)
+    // WM_NOTIFY
     // ==========================================
     LRESULT OnNotify(WPARAM, LPARAM lp) {
         LPNMHDR nmh = (LPNMHDR)lp;
-
         if (nmh->hwndFrom == m_playlistLV) {
             switch (nmh->code) {
-                    case LVN_COLUMNCLICK: {
+                case LVN_COLUMNCLICK: {
                     LPNMLISTVIEW lv = (LPNMLISTVIEW)lp;
                     OnLVColumnClick(lv->iSubItem);
                     return 0;
@@ -447,28 +479,22 @@ private:
     }
 
     // ==========================================
-    // ListView custom draw (title + artist two-line)
-    // ==========================================
-    // ==========================================
-    // ListView column click sorting
+    // Sort
     // ==========================================
     void OnLVColumnClick(int column) {
-        // Toggle direction if same column
         if (column == m_sortColumn)
             m_sortAscending = !m_sortAscending;
         else {
             m_sortColumn = column;
-            m_sortAscending = (column != 3); // 时长默认降序
+            m_sortAscending = (column != 3);
         }
 
-        // Remember current song for index tracking
         std::wstring curPath;
         if (m_currentIndex >= 0 && m_currentIndex < m_playlist.GetCount())
             curPath = m_playlist.GetFile(m_currentIndex);
 
         m_playlist.Sort(column, m_sortAscending);
 
-        // Update column headers with sort indicator
         for (int i = 0; i < 4; i++) {
             std::wstring label = COL_LABELS[i];
             if (i == column)
@@ -479,10 +505,8 @@ private:
             ListView_SetColumn(m_playlistLV, i, &lc);
         }
 
-        // Refresh items
         RefreshPlaylistUI();
 
-        // Restore current song selection
         if (!curPath.empty()) {
             for (int i = 0; i < m_playlist.GetCount(); i++) {
                 if (m_playlist.GetFile(i) == curPath) {
@@ -506,6 +530,21 @@ private:
     }
 
     // ==========================================
+    // Fisher-Yates shuffle (non-repeating)
+    // ==========================================
+    void Reshuffle() {
+        int count = m_playlist.GetCount();
+        if (count == 0) return;
+        m_shuffleOrder.resize(count);
+        for (int i = 0; i < count; i++) m_shuffleOrder[i] = i;
+        for (int i = count - 1; i > 0; i--) {
+            int j = rand() % (i + 1);
+            std::swap(m_shuffleOrder[i], m_shuffleOrder[j]);
+        }
+        m_shufflePos = 0;
+    }
+
+    // ==========================================
     // Song end
     // ==========================================
     void OnSongEnd() {
@@ -517,11 +556,20 @@ private:
 
         int next = -1;
         switch (m_audio.GetPlayMode()) {
-            case PlayMode::RepeatOne: next = m_currentIndex; break;
-            case PlayMode::Shuffle:   next = rand() % count; break;
+            case PlayMode::RepeatOne:
+                next = m_currentIndex;
+                break;
+            case PlayMode::Shuffle:
+                m_shufflePos++;
+                if (m_shufflePos >= (int)m_shuffleOrder.size())
+                    Reshuffle();
+                if (!m_shuffleOrder.empty())
+                    next = m_shuffleOrder[m_shufflePos];
+                break;
             case PlayMode::Sequential:
             default:
-                if (m_currentIndex + 1 < count) next = m_currentIndex + 1;
+                if (m_currentIndex + 1 < count)
+                    next = m_currentIndex + 1;
                 break;
         }
 
@@ -560,6 +608,10 @@ private:
             SaveLastFolder(path);
             m_playlist.ScanFolder(path);
             RefreshPlaylistUI();
+
+            // Reset shuffle order
+            if (m_shuffleOrder.size() != (size_t)m_playlist.GetCount())
+                Reshuffle();
 
             if (!m_playlist.IsEmpty()) {
                 PlayFile(0);
@@ -605,18 +657,34 @@ private:
         int count = m_playlist.GetCount();
         if (count == 0) return;
         int idx;
-        if (m_audio.GetPlayMode() == PlayMode::Shuffle)
-            idx = rand() % count;
-        else
+        if (m_audio.GetPlayMode() == PlayMode::Shuffle) {
+            m_shufflePos++;
+            if (m_shufflePos >= (int)m_shuffleOrder.size())
+                Reshuffle();
+            idx = m_shuffleOrder[m_shufflePos];
+        } else {
             idx = (m_currentIndex + 1) % count;
+        }
         PlayFile(idx);
     }
 
     // ==========================================
     // Play mode
     // ==========================================
-    void OnCycleMode() { m_audio.CyclePlayMode(); UpdateModeUI(); }
-    void SetPlayMode(PlayMode mode) { m_audio.SetPlayMode(mode); UpdateModeUI(); }
+    void OnCycleMode() {
+        PlayMode old = m_audio.GetPlayMode();
+        m_audio.CyclePlayMode();
+        if (m_audio.GetPlayMode() == PlayMode::Shuffle && old != PlayMode::Shuffle)
+            Reshuffle();
+        UpdateModeUI();
+    }
+
+    void SetPlayMode(PlayMode mode) {
+        m_audio.SetPlayMode(mode);
+        if (mode == PlayMode::Shuffle)
+            Reshuffle();
+        UpdateModeUI();
+    }
 
     void UpdateModeUI() {
         PlayMode pm = m_audio.GetPlayMode();
@@ -624,13 +692,22 @@ private:
         SetWindowTextW(m_btnMode, labels[(int)pm]);
 
         HMENU bar = GetMenu(m_hwnd);
-        HMENU pmMenu = GetSubMenu(bar, 1);
+        HMENU pmMenu = GetSubMenu(bar, 2);
         CheckMenuItem(pmMenu, ID_PLAY_SEQUENTIAL,
             MF_BYCOMMAND | (pm == PlayMode::Sequential ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(pmMenu, ID_PLAY_REPEATONE,
             MF_BYCOMMAND | (pm == PlayMode::RepeatOne ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(pmMenu, ID_PLAY_SHUFFLE,
             MF_BYCOMMAND | (pm == PlayMode::Shuffle ? MF_CHECKED : MF_UNCHECKED));
+    }
+
+    void UpdateSettingsMenu() {
+        HMENU bar = GetMenu(m_hwnd);
+        HMENU settingsMenu = GetSubMenu(bar, 1);
+        CheckMenuItem(settingsMenu, ID_SETTINGS_AUTOPLAY,
+            MF_BYCOMMAND | (m_settingsAutoplay ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(settingsMenu, ID_SETTINGS_REMEMBER,
+            MF_BYCOMMAND | (m_settingsRememberProgress ? MF_CHECKED : MF_UNCHECKED));
     }
 
     // ==========================================
@@ -653,11 +730,9 @@ private:
         UpdateUI();
         UpdatePlaylistSelection();
 
-        // Read metadata from BASS and update SongInfo
         double len = m_audio.GetLength();
         std::wstring meta = m_audio.GetFormattedMetadata();
 
-        // Parse "Artist - Title" format from GetFormattedMetadata
         std::wstring artist, title;
         size_t dash = meta.find(L" - ");
         if (dash != std::wstring::npos) {
@@ -665,10 +740,7 @@ private:
             title  = meta.substr(dash + 3);
         }
 
-        // Update SongInfo with BASS metadata
         m_playlist.UpdateMetadata(index, artist, title, L"", len);
-
-        // Update the list view items for this index
         UpdateLVItem(index);
 
         if (!meta.empty())
@@ -677,6 +749,11 @@ private:
             SetWindowTextW(m_staticSong, (L"正在播放: " + GetDisplayName(path)).c_str());
 
         SetTimer(m_hwnd, TIMER_ID_SEEK, 500, NULL);
+
+        // Save last song info for restoration on next launch
+        if (m_settingsRememberProgress) {
+            SaveLastSong();
+        }
     }
 
     // ==========================================
@@ -730,27 +807,22 @@ private:
         ListView_EnsureVisible(m_playlistLV, m_currentIndex, FALSE);
     }
 
-    // ---- ListView item management ----
     void UpdateLVItem(int index) {
         if (index < 0 || index >= m_playlist.GetCount()) return;
         const auto& song = m_playlist.GetSong(index);
 
-        // # column
         wchar_t num[16];
         swprintf(num, 16, L"%d", index + 1);
         ListView_SetItemText(m_playlistLV, index, 0, num);
 
-        // Title column: "Title - Artist"
         std::wstring display = song.title;
         if (!song.artist.empty())
             display = song.title + L" - " + song.artist;
         ListView_SetItemText(m_playlistLV, index, 1, &display[0]);
 
-        // Album column
         std::wstring alb = song.album.empty() ? L"" : song.album;
         ListView_SetItemText(m_playlistLV, index, 2, &alb[0]);
 
-        // Duration column
         std::wstring dur = FormatDuration(song.duration);
         ListView_SetItemText(m_playlistLV, index, 3, &dur[0]);
     }
@@ -767,7 +839,6 @@ private:
             UpdateLVItem(i);
         }
 
-        // Restore sort column headers
         if (m_sortColumn >= 0) {
             for (int i = 0; i < 4; i++) {
                 std::wstring label = COL_LABELS[i];
@@ -782,6 +853,139 @@ private:
 
         SendMessageW(m_playlistLV, WM_SETREDRAW, TRUE, 0);
         InvalidateRect(m_playlistLV, NULL, TRUE);
+    }
+
+    // ==========================================
+    // Settings persistence (.settings.txt) - ANSI
+    // ==========================================
+    void SaveSettings() {
+        std::wstring filePath = GetExeDirectory() + L"\\.settings.txt";
+        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return;
+        DWORD written;
+        char buf[128];
+        int len = sprintf(buf, "autoplay=%d\nremember_progress=%d\n",
+                          m_settingsAutoplay ? 1 : 0,
+                          m_settingsRememberProgress ? 1 : 0);
+        WriteFile(hFile, buf, len, &written, NULL);
+        CloseHandle(hFile);
+    }
+
+    void LoadSettings() {
+        std::wstring filePath = GetExeDirectory() + L"\\.settings.txt";
+        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
+            FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return;
+
+        DWORD size = GetFileSize(hFile, NULL);
+        if (size > 0 && size < 256) {
+            DWORD read = 0;
+            char buf[256] = {};
+            ReadFile(hFile, buf, size, &read, NULL);
+            char* p = buf;
+            while (*p) {
+                char* nl = strchr(p, '\n');
+                if (!nl) nl = p + strlen(p);
+                *nl = '\0';
+                if (sscanf(p, "autoplay=%d", &m_settingsAutoplay) == 1) {}
+                else if (sscanf(p, "remember_progress=%d", &m_settingsRememberProgress) == 1) {}
+                p = nl + 1;
+            }
+        }
+        CloseHandle(hFile);
+    }
+
+    // ==========================================
+    // Last song progress (.lastsong.txt) - UTF-16LE
+    // ==========================================
+    void SaveLastSong() {
+        if (m_currentIndex < 0 || !m_audio.IsLoaded()) return;
+        std::wstring filePath = GetExeDirectory() + L"\\.lastsong.txt";
+        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return;
+        DWORD written;
+        const WORD bom = 0xFEFF;
+        WriteFile(hFile, &bom, 2, &written, NULL);
+
+        wchar_t buf[64];
+        swprintf(buf, 64, L"%d\n", m_currentIndex);
+        WriteFile(hFile, buf, (DWORD)(wcslen(buf) * sizeof(wchar_t)), &written, NULL);
+
+        double pos = m_audio.GetPosition();
+        swprintf(buf, 64, L"%.3f\n", pos);
+        WriteFile(hFile, buf, (DWORD)(wcslen(buf) * sizeof(wchar_t)), &written, NULL);
+
+        const std::wstring& path = m_playlist.GetFile(m_currentIndex);
+        std::wstring line = path + L"\n";
+        WriteFile(hFile, line.c_str(), (DWORD)(line.size() * sizeof(wchar_t)), &written, NULL);
+
+        CloseHandle(hFile);
+    }
+
+    bool LoadLastSong() {
+        std::wstring filePath = GetExeDirectory() + L"\\.lastsong.txt";
+        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
+            FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return false;
+
+        DWORD size = GetFileSize(hFile, NULL);
+        bool loaded = false;
+        if (size > 2) {
+            DWORD read = 0;
+            std::wstring buf(size / 2 + 1, L'\0');
+            ReadFile(hFile, &buf[0], size, &read, NULL);
+            buf[read / 2] = L'\0';
+            CloseHandle(hFile);
+
+            const wchar_t* p = buf.c_str();
+            if (*p == 0xFEFF) p++;
+
+            // Line 1: index
+            const wchar_t* nl1 = wcschr(p, L'\n');
+            if (!nl1) return false;
+            int savedIndex = _wtoi(std::wstring(p, nl1 - p).c_str());
+            p = nl1 + 1;
+
+            // Line 2: position
+            const wchar_t* nl2 = wcschr(p, L'\n');
+            if (!nl2) return false;
+            double savedPos = _wtof(std::wstring(p, nl2 - p).c_str());
+            p = nl2 + 1;
+
+            // Line 3: file path
+            const wchar_t* nl3 = wcschr(p, L'\n');
+            size_t pathLen = nl3 ? (size_t)(nl3 - p) : wcslen(p);
+            if (pathLen > 0 && p[pathLen-1] == L'\r') --pathLen;
+            std::wstring savedPath(p, pathLen);
+
+            // Find the song in current playlist by path
+            if (!savedPath.empty()) {
+                for (int i = 0; i < m_playlist.GetCount(); i++) {
+                    if (m_playlist.GetFile(i) == savedPath) {
+                        PlayFile(i);
+                        if (savedPos > 0) {
+                            m_audio.SetPosition(savedPos);
+                        }
+                        loaded = true;
+                        break;
+                    }
+                }
+            }
+
+            // If path not found but index is valid, use index
+            if (!loaded && savedIndex >= 0 && savedIndex < m_playlist.GetCount()) {
+                PlayFile(savedIndex);
+                if (savedPos > 0) {
+                    m_audio.SetPosition(savedPos);
+                }
+                loaded = true;
+            }
+        } else {
+            CloseHandle(hFile);
+        }
+        return loaded;
     }
 
     // ==========================================
@@ -901,9 +1105,9 @@ private:
             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile == INVALID_HANDLE_VALUE) return;
         DWORD written;
-        wchar_t buf[16];
-        swprintf(buf, 16, L"%d\n", vol);
-        WriteFile(hFile, buf, (DWORD)(wcslen(buf) * sizeof(wchar_t)), &written, NULL);
+        char buf[16];
+        int len = sprintf(buf, "%d\n", vol);
+        WriteFile(hFile, buf, (DWORD)len, &written, NULL);
         CloseHandle(hFile);
     }
 

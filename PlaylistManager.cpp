@@ -54,9 +54,7 @@ void PlaylistManager::ScanDirectory(const std::wstring& dirPath) {
     FindClose(hFind);
 }
 
-// ============================================
 // ID3v1 快速解析 (文件末尾128字节)
-// ============================================
 bool PlaylistManager::ReadID3v1(const std::wstring& filePath, SongInfo& info) {
     HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ,
         NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);

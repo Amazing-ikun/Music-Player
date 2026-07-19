@@ -2,9 +2,7 @@
 #include <string>
 #include <vector>
 
-// ============================================
 // SongInfo - 单曲信息 (延迟加载: 启动时只读ID3v1快速标签)
-// ============================================
 struct SongInfo {
     std::wstring filePath;
     std::wstring title;     // 显示标题 (来自ID3v1或回退到文件名)
@@ -13,9 +11,7 @@ struct SongInfo {
     double       duration;  // 时长(秒), 0 = 未知 (播放时通过BASS获取)
 };
 
-// ============================================
 // PlaylistManager - 播放列表管理器
-// ============================================
 class PlaylistManager {
 public:
     PlaylistManager();

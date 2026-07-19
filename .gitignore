@@ -18,5 +18,8 @@ build/
 .lastfolder.txt
 .volume.txt
 
+# Claude
+.claude/
+
 # BASS SDK (download separately)
 bass24/

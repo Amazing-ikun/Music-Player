@@ -31,9 +31,7 @@ endif()
 include_directories("${BASS_DIR}/include")
 link_directories("${BASS_LIB_DIR}")
 
-# ============================================
 # Sources
-# ============================================
 set(SOURCES
     main.cpp
     AudioEngine.h
@@ -50,9 +48,7 @@ if (MSVC)
     target_compile_options(MusicPlayer PRIVATE /utf-8)
 endif()
 
-# ============================================
 # Link Libraries
-# ============================================
 target_link_libraries(MusicPlayer
     bass.lib
     winmm.lib
@@ -63,9 +59,7 @@ target_link_libraries(MusicPlayer
     gdi32.lib
 )
 
-# ============================================
 # Copy BASS DLL to output directory
-# ============================================
 add_custom_command(TARGET MusicPlayer POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${BASS_LIB_DIR}/bass.dll"

@@ -179,6 +179,7 @@ std::wstring AudioEngine::GetFormattedMetadata() const {
                 for (int i = 0; i < maxLen && data[i] && data[i] != '\0'; ++i) {
                     if (data[i] != ' ' || !s.empty()) s += data[i];
                 }
+                while (!s.empty() && s.back() == ' ') s.pop_back();
                 return s;
             };
             std::string a = trimField(id3 + 33, 30);

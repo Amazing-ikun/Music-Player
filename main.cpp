@@ -333,7 +333,6 @@ private:
     void OnRealClose() {
         SavePlaylist();
         SaveVolume();
-        SaveHotkeyBindings();
         SaveSettings();
         UnregisterHotKeys();
         RemoveTrayIcon();
@@ -1325,56 +1324,24 @@ private:
     // ==========================================
     // Hotkey bindings persistence
     // ==========================================
+    // ==========================================
+    // Hotkey bindings persistence (.hotkeys.txt) - ANSI
+    // ==========================================
     void SaveHotkeyBindings() {
-        std::wstring filePath = GetExeDirectory() + L"\\.settings.txt";
-        // Read existing settings first
-        char oldBuf[1024] = {};
-        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
-            FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile != INVALID_HANDLE_VALUE) {
-            DWORD sz = GetFileSize(hFile, NULL);
-            if (sz > 0 && sz < 1024) ReadFile(hFile, oldBuf, sz, &sz, NULL);
-            CloseHandle(hFile);
-        }
-
-        // Collect all setting lines except hotkey ones
-        std::string settings;
-        char* p = oldBuf;
-        while (*p) {
-            char* nl = strchr(p, '\n');
-            if (!nl) nl = p + strlen(p);
-
-            // Strip \r before \n
-            char* end = nl;
-            while (end > p && *(end - 1) == '\r') --end;
-
-            char saved = *end;
-            *end = '\0';
-            if (strncmp(p, "hk_", 3) != 0) {
-                settings += p; settings += "\n";
-            }
-            *end = saved;
-            p = nl + 1;
-        }
-
-        // Append current hotkey bindings
+        std::wstring filePath = GetExeDirectory() + L"\\.hotkeys.txt";
+        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return;
+        DWORD written;
         for (int i = 0; i < m_hotkeyCount; i++) {
-            char line[128];
             std::wstring code = BindingToCode(m_hotkeys[i].vk, m_hotkeys[i].mod);
-            char codeA[128];
+            char line[128];
+            char codeA[256];
             sprintf(codeA, "%S", code.c_str());
             sprintf(line, "hk_%s=%s\n", HKSettingKey(i), codeA);
-            settings += line;
+            WriteFile(hFile, line, (DWORD)strlen(line), &written, NULL);
         }
-
-        // Write all back
-        hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
-            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile != INVALID_HANDLE_VALUE) {
-            DWORD written;
-            WriteFile(hFile, settings.c_str(), (DWORD)settings.size(), &written, NULL);
-            CloseHandle(hFile);
-        }
+        CloseHandle(hFile);
     }
 
     const char* HKSettingKey(int idx) {
@@ -1402,27 +1369,22 @@ private:
     }
 
     void LoadHotkeyBindings() {
-        std::wstring filePath = GetExeDirectory() + L"\\.settings.txt";
+        std::wstring filePath = GetExeDirectory() + L"\\.hotkeys.txt";
         HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
             FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile == INVALID_HANDLE_VALUE) return;
 
         DWORD size = GetFileSize(hFile, NULL);
-        if (size > 0 && size < 2048) {
-            char buf[2048] = {};
+        if (size > 0 && size < 1024) {
+            char buf[1024] = {};
             DWORD read;
             ReadFile(hFile, buf, size, &read, NULL);
             char* p = buf;
             while (*p) {
                 char* nl = strchr(p, '\n');
                 if (!nl) nl = p + strlen(p);
-
-                // Strip \r before \n
-                char* end = nl;
-                while (end > p && *(end - 1) == '\r') --end;
-
-                char saved = *end;
-                *end = '\0';
+                char saved = *nl;
+                *nl = '\0';
                 if (strncmp(p, "hk_", 3) == 0) {
                     char* eq = strchr(p, '=');
                     if (eq) {
@@ -1446,7 +1408,7 @@ private:
                         }
                     }
                 }
-                *end = saved;
+                *nl = saved;
                 p = nl + 1;
             }
         }
@@ -1454,16 +1416,25 @@ private:
     }
 
     // ==========================================
-    // Settings persistence
+    // Settings persistence (.settings.txt)
     // ==========================================
     void SaveSettings() {
-        // SaveHotkeyBindings does the full .settings.txt write
-        // This only handles non-hotkey settings by merging
         SaveHotkeyBindings();
+        std::wstring filePath = GetExeDirectory() + L"\\.settings.txt";
+        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return;
+        DWORD written;
+        char buf[128];
+        int len = sprintf(buf, "autoplay=%d\nremember_progress=%d\ntray_minimize=%d\n",
+                          m_settingsAutoplay ? 1 : 0,
+                          m_settingsRememberProgress ? 1 : 0,
+                          m_settingsTray ? 1 : 0);
+        WriteFile(hFile, buf, (DWORD)len, &written, NULL);
+        CloseHandle(hFile);
     }
 
     void LoadSettings() {
-        // Already reads all settings including hk_*, done in LoadHotkeyBindings
         LoadHotkeyBindings();
 
         // Now read just the plain settings

@@ -15,7 +15,6 @@
 // Menu Command IDs
 #define ID_FILE_OPENFOLDER  2001
 #define ID_FILE_EXIT        2002
-#define ID_FILE_ADDFILES    2008
 #define ID_PLAY_SEQUENTIAL  2003
 #define ID_PLAY_REPEATONE   2004
 #define ID_PLAY_SHUFFLE     2005
@@ -25,6 +24,7 @@
 #define ID_SETTINGS_TRAY      2009
 #define ID_TRAY_EXIT          2010
 #define ID_TRAY_RESTORE       2011
+#define ID_SETTINGS_HOTKEYS   2012
 
 // Custom Window Messages
 #define WM_USER_SONG_END    (WM_USER + 100)

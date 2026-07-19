@@ -68,6 +68,86 @@ static std::wstring GetExeDirectory() {
 static const wchar_t* COL_LABELS[4] = { L"#", L"标题", L"专辑", L"时长" };
 static const int COL_WIDTHS[4] = { 40, 280, 180, 80 };
 
+// ==========================================
+// HotkeyBinding - 单个快捷键配置
+// ==========================================
+struct HotkeyBinding {
+    int    id;
+    const wchar_t* actionName;
+    int    vk;
+    int    mod;       // MOD_CONTROL, MOD_ALT, or combination
+};
+
+// Key name lookup tables
+static const struct { int vk; const wchar_t* name; } VK_NAMES[] = {
+    { VK_LEFT,  L"Left"  }, { VK_RIGHT, L"Right" },
+    { VK_UP,    L"Up"    }, { VK_DOWN,  L"Down"  },
+    { VK_SPACE, L"Space" }, { VK_RETURN,L"Enter" },
+    { VK_TAB,   L"Tab"   }, { VK_DELETE,L"Del"   },
+    { VK_ESCAPE,L"Esc"   }, { VK_BACK,  L"Back"  },
+    { VK_HOME,  L"Home"  }, { VK_END,   L"End"   },
+    { VK_PRIOR, L"PgUp"  }, { VK_NEXT,  L"PgDn"  },
+    { VK_OEM_PLUS, L"+"  }, { VK_OEM_MINUS, L"-" },
+    { 0, NULL }
+};
+
+static std::wstring VkToName(int vk) {
+    for (auto& e : VK_NAMES) { if (e.vk == vk) return e.name; }
+    if (vk >= '0' && vk <= '9') return std::wstring(1, (wchar_t)vk);
+    if (vk >= 'A' && vk <= 'Z') return std::wstring(1, (wchar_t)vk);
+    wchar_t buf[16]; swprintf(buf, 16, L"VK_%d", vk); return buf;
+}
+
+static int NameToVk(const std::wstring& name) {
+    for (auto& e : VK_NAMES) { if (name == e.name) return e.vk; }
+    if (name.size() == 1) {
+        wchar_t c = name[0];
+        if (c >= '0' && c <= '9') return (int)c;
+        if (c >= 'A' && c <= 'Z') return (int)c;
+        if (c >= 'a' && c <= 'z') return (int)(c - 32);
+    }
+    return 0;
+}
+
+static std::wstring HotkeyToString(int vk, int mod) {
+    std::wstring s;
+    if (mod & MOD_CONTROL) s += L"Ctrl+";
+    if (mod & MOD_ALT)    s += L"Alt+";
+    s += VkToName(vk);
+    return s;
+}
+
+// Encode binding as short key: "CA+Left", "C+P", "A+Space"
+static std::wstring BindingToCode(int vk, int mod) {
+    std::wstring s;
+    if (mod & MOD_CONTROL) s += L"C";
+    if (mod & MOD_ALT)    s += L"A";
+    if (!s.empty()) s += L"+";
+    s += VkToName(vk);
+    return s;
+}
+
+static bool CodeToBinding(const std::wstring& code, int& vk, int& mod) {
+    vk = 0; mod = 0;
+    size_t pos = code.find(L'+');
+    if (pos == std::wstring::npos) return false;
+    std::wstring modPart = code.substr(0, pos);
+    std::wstring keyPart = code.substr(pos + 1);
+    for (auto c : modPart) {
+        if (c == L'C' || c == L'c') mod |= MOD_CONTROL;
+        if (c == L'A' || c == L'a') mod |= MOD_ALT;
+    }
+    vk = NameToVk(keyPart);
+    return vk != 0;
+}
+
+// Forward declaration for the hotkey dialog
+class MainWindow;
+static INT_PTR CALLBACK HotkeyDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
+
+// ==========================================
+// MainWindow
+// ==========================================
 class MainWindow {
 public:
     MainWindow()
@@ -83,6 +163,7 @@ public:
         , m_settingsTray(true), m_trayIconAdded(false)
     {
         srand((unsigned)time(NULL));
+        InitDefaultHotkeys();
     }
 
     bool Create(HINSTANCE hInst, int nCmdShow) {
@@ -145,6 +226,10 @@ private:
     bool m_settingsTray;
     bool m_trayIconAdded;
 
+    // ---- Hotkeys ----
+    HotkeyBinding m_hotkeys[7];
+    int m_hotkeyCount;
+
     HFONT m_hFont;
 
     static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -162,8 +247,7 @@ private:
     }
 
     LRESULT HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
-        // In-app keyboard shortcuts (Ctrl+key)
-        if (msg == WM_KEYDOWN && (GetAsyncKeyState(VK_CONTROL) & 0x8000)) {
+        if (msg == WM_KEYDOWN) {
             if (HandleAccelerator((int)wp)) return 0;
         }
         switch (msg) {
@@ -175,13 +259,24 @@ private:
             case WM_COMMAND:           OnCommand(wp, lp);            return 0;
             case WM_HSCROLL:           OnHScroll(wp, lp);            return 0;
             case WM_TIMER:             if (wp == TIMER_ID_SEEK) OnTimer(); return 0;
-            case WM_HOTKEY:            OnGlobalHotkey((int)wp);  return 0;
+            case WM_HOTKEY:            OnGlobalHotkey((int)wp);     return 0;
             case WM_NOTIFY:            return OnNotify(wp, lp);
             default:
                 if (msg == WM_USER_SONG_END) { OnSongEnd(); return 0; }
                 if (msg == WM_APP_TRAY) { HandleTrayMessage(wp, lp); return 0; }
                 return DefWindowProcW(m_hwnd, msg, wp, lp);
         }
+    }
+
+    void InitDefaultHotkeys() {
+        m_hotkeyCount = 7;
+        m_hotkeys[0] = { HKID_PLAYPAUSE, L"播放/暂停",     'P',   MOD_CONTROL };
+        m_hotkeys[1] = { HKID_PREV,      L"上一首",         VK_LEFT,  MOD_CONTROL };
+        m_hotkeys[2] = { HKID_NEXT,      L"下一首",         VK_RIGHT, MOD_CONTROL };
+        m_hotkeys[3] = { HKID_VOLUP,     L"音量增加",       VK_UP,    MOD_CONTROL };
+        m_hotkeys[4] = { HKID_VOLDN,     L"音量减小",       VK_DOWN,  MOD_CONTROL };
+        m_hotkeys[5] = { HKID_RESTORE,   L"从托盘恢复",     'O',     MOD_CONTROL };
+        m_hotkeys[6] = { HKID_MINIMIZE,  L"最小化到托盘",   'K',     MOD_CONTROL };
     }
 
     void OnCreate() {
@@ -232,6 +327,7 @@ private:
     void OnRealClose() {
         SavePlaylist();
         SaveVolume();
+        SaveHotkeyBindings();
         SaveSettings();
         UnregisterHotKeys();
         RemoveTrayIcon();
@@ -259,6 +355,9 @@ private:
             L"记住播放进度");
         AppendMenuW(settingsMenu, MF_STRING | MF_CHECKED, ID_SETTINGS_TRAY,
             L"最小化到托盘");
+        AppendMenuW(settingsMenu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(settingsMenu, MF_STRING, ID_SETTINGS_HOTKEYS,
+            L"配置快捷键...");
         AppendMenuW(bar, MF_POPUP, (UINT_PTR)settingsMenu, L"设置(&S)");
 
         HMENU playMenu = CreatePopupMenu();
@@ -422,6 +521,9 @@ private:
                     UpdateSettingsMenu();
                     if (!m_settingsTray) RemoveTrayIcon();
                     break;
+                case ID_SETTINGS_HOTKEYS:
+                    ShowHotkeyDialog();
+                    break;
                 case ID_PLAY_SEQUENTIAL: SetPlayMode(PlayMode::Sequential); break;
                 case ID_PLAY_REPEATONE:  SetPlayMode(PlayMode::RepeatOne);  break;
                 case ID_PLAY_SHUFFLE:
@@ -554,7 +656,7 @@ private:
     }
 
     // ==========================================
-    // Fisher-Yates shuffle (non-repeating)
+    // Fisher-Yates shuffle
     // ==========================================
     void Reshuffle() {
         int count = m_playlist.GetCount();
@@ -647,21 +749,17 @@ private:
     }
 
     // ==========================================
-    // Playback controls
-    // ==========================================
-    // ==========================================
-    // Add files from multi-file dialog
+    // Add files
     // ==========================================
     void AddFiles() {
-        wchar_t buf[65536];
-        buf[0] = L'0';
+        wchar_t buf[65536] = {};
 
         OPENFILENAMEW ofn = {};
         ofn.lStructSize     = sizeof(ofn);
         ofn.hwndOwner       = m_hwnd;
         ofn.lpstrFile       = buf;
         ofn.nMaxFile        = 65536;
-        ofn.lpstrFilter     = L"音频文件 (*.mp3;*.flac;*.wav)0*.mp3;*.flac;*.wav0所有文件 (*.*)0*.*0";
+        ofn.lpstrFilter     = L"音频文件 (*.mp3;*.flac;*.wav)\0*.mp3;*.flac;*.wav\0所有文件 (*.*)\0*.*\0";
         ofn.nFilterIndex    = 1;
         ofn.Flags           = OFN_ALLOWMULTISELECT | OFN_EXPLORER |
                               OFN_HIDEREADONLY | OFN_FILEMUSTEXIST |
@@ -674,7 +772,7 @@ private:
         bool added = false;
         bool hadItems = !m_playlist.IsEmpty();
 
-        if (buf[offset] == L'0') {
+        if (buf[offset] == L'\0') {
             std::wstring ext;
             const wchar_t* dot = wcsrchr(buf, L'.');
             if (dot) ext = dot;
@@ -683,7 +781,7 @@ private:
                 added = true;
             }
         } else {
-            while (buf[offset] != L'0') {
+            while (buf[offset] != L'\0') {
                 std::wstring fullPath = dir + L"\\" + (buf + offset);
                 std::wstring ext;
                 const wchar_t* dot = wcsrchr(buf + offset, L'.');
@@ -693,10 +791,7 @@ private:
                     for (int i = 0; i < m_playlist.GetCount(); i++) {
                         if (m_playlist.GetFile(i) == fullPath) { dup = true; break; }
                     }
-                    if (!dup) {
-                        m_playlist.AddFile(fullPath);
-                        added = true;
-                    }
+                    if (!dup) { m_playlist.AddFile(fullPath); added = true; }
                 }
                 offset += wcslen(buf + offset) + 1;
             }
@@ -704,11 +799,9 @@ private:
 
         if (added) {
             RefreshPlaylistUI();
-            if (m_audio.GetPlayMode() == PlayMode::Shuffle)
-                Reshuffle();
-            if (!hadItems) {
-                PlayFile(0);
-            } else {
+            if (m_audio.GetPlayMode() == PlayMode::Shuffle) Reshuffle();
+            if (!hadItems) PlayFile(0);
+            else {
                 SetWindowTextW(m_staticSong,
                     (L"已添加 " + std::to_wstring(m_playlist.GetCount()) + L" 首歌曲").c_str());
                 UpdateUI();
@@ -716,6 +809,9 @@ private:
         }
     }
 
+    // ==========================================
+    // Playback controls
+    // ==========================================
     void OnPlayPause() {
         if (!m_audio.IsLoaded()) return;
         if (m_audio.IsPlaying()) {
@@ -758,8 +854,7 @@ private:
         int idx;
         if (m_audio.GetPlayMode() == PlayMode::Shuffle) {
             m_shufflePos++;
-            if (m_shufflePos >= (int)m_shuffleOrder.size())
-                Reshuffle();
+            if (m_shufflePos >= (int)m_shuffleOrder.size()) Reshuffle();
             idx = m_shuffleOrder[m_shufflePos];
         } else {
             idx = (m_currentIndex + 1) % count;
@@ -767,9 +862,6 @@ private:
         PlayFile(idx);
     }
 
-    // ==========================================
-    // Play mode
-    // ==========================================
     void OnCycleMode() {
         PlayMode old = m_audio.GetPlayMode();
         m_audio.CyclePlayMode();
@@ -780,8 +872,7 @@ private:
 
     void SetPlayMode(PlayMode mode) {
         m_audio.SetPlayMode(mode);
-        if (mode == PlayMode::Shuffle)
-            Reshuffle();
+        if (mode == PlayMode::Shuffle) Reshuffle();
         UpdateModeUI();
     }
 
@@ -815,20 +906,30 @@ private:
     // Keyboard shortcuts
     // ==========================================
     bool HandleAccelerator(int vk) {
-        switch (vk) {
-            case 'P': OnPlayPause();       return true;
-            case VK_LEFT:  OnPrev();       return true;
-            case VK_RIGHT: OnNext();       return true;
-            case VK_UP:    AdjustVolume(5);   return true;
-            case VK_DOWN:  AdjustVolume(-5);  return true;
-            case 'O': ShowWindow(m_hwnd, SW_RESTORE); SetForegroundWindow(m_hwnd); RemoveTrayIcon(); return true;
-            case 'K': MinimizeToTray();    return true;
+        int heldMod = 0;
+        if (GetAsyncKeyState(VK_CONTROL) & 0x8000) heldMod |= MOD_CONTROL;
+        if (GetAsyncKeyState(VK_MENU) & 0x8000)    heldMod |= MOD_ALT;
+        if (GetAsyncKeyState(VK_SHIFT) & 0x8000)   heldMod |= 0x0004; // MOD_SHIFT
+
+        for (int i = 0; i < m_hotkeyCount; i++) {
+            if (vk == m_hotkeys[i].vk && heldMod == m_hotkeys[i].mod) {
+                // Don't trigger for plain key presses (no modifier) — let text through
+                if (heldMod == 0) continue;
+                ExecuteHotkey(i);
+                return true;
+            }
         }
         return false;
     }
 
     void OnGlobalHotkey(int id) {
-        switch (id) {
+        for (int i = 0; i < m_hotkeyCount; i++) {
+            if (m_hotkeys[i].id == id) { ExecuteHotkey(i); return; }
+        }
+    }
+
+    void ExecuteHotkey(int idx) {
+        switch (m_hotkeys[idx].id) {
             case HKID_PLAYPAUSE: OnPlayPause();  break;
             case HKID_PREV:      OnPrev();        break;
             case HKID_NEXT:      OnNext();        break;
@@ -841,24 +942,21 @@ private:
 
     void RegisterHotKeys() {
         HWND h = m_hwnd;
-        RegisterHotKey(h, HKID_PLAYPAUSE, MOD_CONTROL | MOD_ALT, 'P');
-        RegisterHotKey(h, HKID_PREV,      MOD_CONTROL | MOD_ALT, VK_LEFT);
-        RegisterHotKey(h, HKID_NEXT,      MOD_CONTROL | MOD_ALT, VK_RIGHT);
-        RegisterHotKey(h, HKID_VOLUP,     MOD_CONTROL | MOD_ALT, VK_UP);
-        RegisterHotKey(h, HKID_VOLDN,     MOD_CONTROL | MOD_ALT, VK_DOWN);
-        RegisterHotKey(h, HKID_RESTORE,   MOD_CONTROL | MOD_ALT, 'O');
-        RegisterHotKey(h, HKID_MINIMIZE,  MOD_CONTROL | MOD_ALT, 'K');
+        for (int i = 0; i < m_hotkeyCount; i++) {
+            // In-app: user-configured modifiers (default: Ctrl)
+            RegisterHotKey(h, m_hotkeys[i].id, m_hotkeys[i].mod, m_hotkeys[i].vk);
+            // Global: auto-add Alt (default: Ctrl+Alt)
+            int globalMod = m_hotkeys[i].mod | MOD_ALT;
+            RegisterHotKey(h, m_hotkeys[i].id + 1000, globalMod, m_hotkeys[i].vk);
+        }
     }
 
     void UnregisterHotKeys() {
         HWND h = m_hwnd;
-        UnregisterHotKey(h, HKID_PLAYPAUSE);
-        UnregisterHotKey(h, HKID_PREV);
-        UnregisterHotKey(h, HKID_NEXT);
-        UnregisterHotKey(h, HKID_VOLUP);
-        UnregisterHotKey(h, HKID_VOLDN);
-        UnregisterHotKey(h, HKID_RESTORE);
-        UnregisterHotKey(h, HKID_MINIMIZE);
+        for (int i = 0; i < m_hotkeyCount; i++) {
+            UnregisterHotKey(h, m_hotkeys[i].id);
+            UnregisterHotKey(h, m_hotkeys[i].id + 1000);
+        }
     }
 
     void AdjustVolume(int delta) {
@@ -868,6 +966,162 @@ private:
         m_audio.SetVolume(vol);
         SendMessageW(m_sliderVol, TBM_SETPOS, TRUE, vol);
         UpdateVolLabel();
+    }
+
+    // ==========================================
+    // Hotkey config dialog
+    // ==========================================
+    void ShowHotkeyDialog() {
+        // Make a working copy so user can cancel
+        HotkeyBinding tmp[7];
+        memcpy(tmp, m_hotkeys, sizeof(m_hotkeys));
+
+        // Create dialog class (simple popup)
+        const wchar_t DLG_CLASS[] = L"HotkeyConfigDlg";
+        WNDCLASSEXW wc = {};
+        wc.cbSize        = sizeof(wc);
+        wc.style         = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc   = HotkeyDlgProc;
+        wc.hInstance     = m_hInst;
+        wc.hIcon         = LoadIcon(NULL, IDI_APPLICATION);
+        wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = DLG_CLASS;
+        RegisterClassExW(&wc);
+
+        // Store reference as creation param
+        struct DlgData { MainWindow* win; HotkeyBinding* bindings; int count; int recording; };
+        DlgData dd = { this, tmp, m_hotkeyCount, -1 };
+
+        int dlgW = 460, dlgH = 350;
+        int sw = GetSystemMetrics(SM_CXSCREEN);
+        int sh = GetSystemMetrics(SM_CYSCREEN);
+        int x = (sw - dlgW) / 2, y = (sh - dlgH) / 2;
+
+        HWND hDlg = CreateWindowExW(0, DLG_CLASS, L"配置快捷键",
+            WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+            x, y, dlgW, dlgH, m_hwnd, NULL, m_hInst, &dd);
+
+        if (!hDlg) return;
+
+        HFONT hGuiFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"微软雅黑");
+
+        // Create static labels + clickable binding areas
+        int rowY = 20;
+        for (int i = 0; i < m_hotkeyCount; i++) {
+            wchar_t label[64];
+            swprintf(label, 64, L"%s:", m_hotkeys[i].actionName);
+
+            CreateWindowExW(0, L"STATIC", label,
+                WS_CHILD | WS_VISIBLE,
+                20, rowY, 140, 24, hDlg, NULL, m_hInst, NULL);
+
+            // Clickable key display
+            std::wstring keyText = HotkeyToString(tmp[i].vk, tmp[i].mod);
+            HWND hKey = CreateWindowExW(0, L"STATIC", keyText.c_str(),
+                WS_CHILD | WS_VISIBLE | SS_CENTER | SS_SUNKEN,
+                170, rowY, 200, 24, hDlg, (HMENU)(100 + i), m_hInst, NULL);
+            SendMessageW(hKey, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
+
+            // "更改" button
+            CreateWindowExW(0, L"BUTTON", L"更改",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                380, rowY, 60, 24, hDlg, (HMENU)(200 + i), m_hInst, NULL);
+
+            rowY += 32;
+        }
+
+        // "点击某项后按下新快捷键..." hint
+        CreateWindowExW(0, L"STATIC", L"提示: 点击\"更改\"后按下新的按键组合",
+            WS_CHILD | WS_VISIBLE | SS_CENTER,
+            20, rowY + 10, dlgW - 40, 20, hDlg, NULL, m_hInst, NULL);
+
+        // OK / Cancel
+        CreateWindowExW(0, L"BUTTON", L"确定",
+            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            dlgW / 2 - 110, rowY + 40, 90, 28, hDlg, (HMENU)IDOK, m_hInst, NULL);
+        CreateWindowExW(0, L"BUTTON", L"取消",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            dlgW / 2 + 20, rowY + 40, 90, 28, hDlg, (HMENU)IDCANCEL, m_hInst, NULL);
+
+        // Apply font to all controls
+        {
+            HWND clist[] = { hDlg };
+            // We'll set font individually above
+        }
+
+        // Simple modal loop
+        EnableWindow(m_hwnd, FALSE);
+        MSG msg;
+        while (IsWindow(hDlg) && GetMessageW(&msg, NULL, 0, 0)) {
+            if (msg.hwnd == hDlg || IsChild(hDlg, msg.hwnd)) {
+                if (msg.message == WM_KEYDOWN) {
+                    // Check for modifier keys combo
+                    int mod = 0;
+                    if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mod |= MOD_CONTROL;
+                    if (GetAsyncKeyState(VK_MENU) & 0x8000)    mod |= MOD_ALT;
+                    int vk = (int)msg.wParam;
+
+                    // Don't register modifier-only presses
+                    if (vk == VK_CONTROL || vk == VK_MENU || vk == VK_SHIFT) continue;
+                    if (vk == VK_ESCAPE) { DestroyWindow(hDlg); break; }
+                    if (vk == VK_RETURN) { SendMessageW(hDlg, WM_COMMAND, IDOK, 0); break; }
+
+                    // Find which row is in recording mode
+                    BOOL found = FALSE;
+                    for (int i = 0; i < m_hotkeyCount; i++) {
+                        if (GetWindowLongPtrW(GetDlgItem(hDlg, 200 + i), GWLP_USERDATA) == 1) {
+                            // Update binding
+                            if (mod == 0) mod = MOD_CONTROL; // require at least Ctrl
+                            tmp[i].vk = vk;
+                            tmp[i].mod = mod;
+                            std::wstring ks = HotkeyToString(vk, mod);
+                            SetWindowTextW(GetDlgItem(hDlg, 100 + i), ks.c_str());
+                            SetWindowLongPtrW(GetDlgItem(hDlg, 200 + i), GWLP_USERDATA, 0);
+                            found = TRUE;
+                            break;
+                        }
+                    }
+                    if (found) continue;
+                }
+
+                // Route button clicks
+                if (msg.message == WM_COMMAND && HIWORD(msg.wParam) == BN_CLICKED) {
+                    int ctrlId = LOWORD(msg.wParam);
+                    if (ctrlId >= 200 && ctrlId < 200 + m_hotkeyCount) {
+                        int idx = ctrlId - 200;
+                        // Reset all
+                        for (int j = 0; j < m_hotkeyCount; j++)
+                            SetWindowLongPtrW(GetDlgItem(hDlg, 200 + j), GWLP_USERDATA, 0);
+                        // Mark this one
+                        SetWindowLongPtrW(GetDlgItem(hDlg, ctrlId), GWLP_USERDATA, 1);
+                        SetWindowTextW(GetDlgItem(hDlg, 100 + idx), L"[按下新按键...]");
+                        continue;
+                    }
+                    if (ctrlId == IDOK) {
+                        // Apply
+                        memcpy(m_hotkeys, tmp, sizeof(m_hotkeys));
+                        UnregisterHotKeys();
+                        RegisterHotKeys();
+                        SaveHotkeyBindings();
+                        DestroyWindow(hDlg);
+                        break;
+                    }
+                    if (ctrlId == IDCANCEL || ctrlId == ID_TRAY_EXIT) {
+                        DestroyWindow(hDlg);
+                        break;
+                    }
+                }
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        EnableWindow(m_hwnd, TRUE);
+        SetForegroundWindow(m_hwnd);
+        DeleteObject(hGuiFont);
+        UnregisterClassW(DLG_CLASS, m_hInst);
     }
 
     // ==========================================
@@ -910,7 +1164,6 @@ private:
 
         SetTimer(m_hwnd, TIMER_ID_SEEK, 500, NULL);
 
-        // Update tray tooltip
         std::wstring tipText = meta.empty() ? GetDisplayName(path) : meta;
         UpdateTrayTip(L"正在播放: " + tipText);
 
@@ -1019,42 +1272,157 @@ private:
     }
 
     // ==========================================
-    // Settings persistence (.settings.txt)
+    // Hotkey bindings persistence
     // ==========================================
-    void SaveSettings() {
+    void SaveHotkeyBindings() {
         std::wstring filePath = GetExeDirectory() + L"\\.settings.txt";
-        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
+        // Read existing settings first
+        char oldBuf[1024] = {};
+        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
+            FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            DWORD sz = GetFileSize(hFile, NULL);
+            if (sz > 0 && sz < 1024) ReadFile(hFile, oldBuf, sz, &sz, NULL);
+            CloseHandle(hFile);
+        }
+
+        // Collect all setting lines except hotkey ones
+        std::string settings;
+        char* p = oldBuf;
+        while (*p) {
+            char* nl = strchr(p, '\n');
+            if (!nl) nl = p + strlen(p);
+            *nl = '\0';
+            if (strncmp(p, "hk_", 3) != 0) {
+                settings += p; settings += "\n";
+            }
+            p = nl + 1;
+        }
+
+        // Append current hotkey bindings
+        for (int i = 0; i < m_hotkeyCount; i++) {
+            char line[128];
+            std::wstring code = BindingToCode(m_hotkeys[i].vk, m_hotkeys[i].mod);
+            char codeA[128];
+            sprintf(codeA, "%S", code.c_str());
+            sprintf(line, "hk_%s=%s\n", HKSettingKey(i), codeA);
+            settings += line;
+        }
+
+        // Write all back
+        hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE) return;
-        DWORD written;
-        char buf[128];
-        int len = sprintf(buf, "autoplay=%d\nremember_progress=%d\ntray_minimize=%d\n",
-                          m_settingsAutoplay ? 1 : 0,
-                          m_settingsRememberProgress ? 1 : 0,
-                          m_settingsTray ? 1 : 0);
-        WriteFile(hFile, buf, len, &written, NULL);
-        CloseHandle(hFile);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            DWORD written;
+            WriteFile(hFile, settings.c_str(), (DWORD)settings.size(), &written, NULL);
+            CloseHandle(hFile);
+        }
     }
 
-    void LoadSettings() {
+    const char* HKSettingKey(int idx) {
+        switch (m_hotkeys[idx].id) {
+            case HKID_PLAYPAUSE: return "playpause";
+            case HKID_PREV:      return "prev";
+            case HKID_NEXT:      return "next";
+            case HKID_VOLUP:     return "volup";
+            case HKID_VOLDN:     return "voldn";
+            case HKID_RESTORE:   return "restore";
+            case HKID_MINIMIZE:  return "minimize";
+            default: return "unknown";
+        }
+    }
+
+    int HKIdFromKey(const char* key) {
+        if (strcmp(key, "playpause") == 0) return HKID_PLAYPAUSE;
+        if (strcmp(key, "prev") == 0)      return HKID_PREV;
+        if (strcmp(key, "next") == 0)      return HKID_NEXT;
+        if (strcmp(key, "volup") == 0)     return HKID_VOLUP;
+        if (strcmp(key, "voldn") == 0)     return HKID_VOLDN;
+        if (strcmp(key, "restore") == 0)   return HKID_RESTORE;
+        if (strcmp(key, "minimize") == 0)  return HKID_MINIMIZE;
+        return -1;
+    }
+
+    void LoadHotkeyBindings() {
         std::wstring filePath = GetExeDirectory() + L"\\.settings.txt";
         HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
             FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile == INVALID_HANDLE_VALUE) return;
 
         DWORD size = GetFileSize(hFile, NULL);
-        if (size > 0 && size < 256) {
-            DWORD read = 0;
-            char buf[256] = {};
+        if (size > 0 && size < 2048) {
+            char buf[2048] = {};
+            DWORD read;
             ReadFile(hFile, buf, size, &read, NULL);
             char* p = buf;
             while (*p) {
                 char* nl = strchr(p, '\n');
                 if (!nl) nl = p + strlen(p);
                 *nl = '\0';
-                if (sscanf(p, "autoplay=%d", &m_settingsAutoplay) == 1) {}
-                else if (sscanf(p, "remember_progress=%d", &m_settingsRememberProgress) == 1) {}
-                else if (sscanf(p, "tray_minimize=%d", &m_settingsTray) == 1) {}
+                if (strncmp(p, "hk_", 3) == 0) {
+                    char* eq = strchr(p, '=');
+                    if (eq) {
+                        *eq = '\0';
+                        const char* keyName = p + 3;
+                        const char* codeStr = eq + 1;
+                        int id = HKIdFromKey(keyName);
+                        if (id > 0) {
+                            // Convert ANSI code string to wide
+                            wchar_t codeW[64];
+                            swprintf(codeW, 64, L"%S", codeStr);
+                            int vk, mod;
+                            if (CodeToBinding(codeW, vk, mod)) {
+                                for (int i = 0; i < m_hotkeyCount; i++) {
+                                    if (m_hotkeys[i].id == id) {
+                                        m_hotkeys[i].vk = vk;
+                                        m_hotkeys[i].mod = mod;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                p = nl + 1;
+            }
+        }
+        CloseHandle(hFile);
+    }
+
+    // ==========================================
+    // Settings persistence
+    // ==========================================
+    void SaveSettings() {
+        // SaveHotkeyBindings does the full .settings.txt write
+        // This only handles non-hotkey settings by merging
+        SaveHotkeyBindings();
+    }
+
+    void LoadSettings() {
+        // Already reads all settings including hk_*, done in LoadHotkeyBindings
+        LoadHotkeyBindings();
+
+        // Now read just the plain settings
+        std::wstring filePath = GetExeDirectory() + L"\\.settings.txt";
+        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
+            FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return;
+
+        DWORD size = GetFileSize(hFile, NULL);
+        if (size > 0 && size < 2048) {
+            char buf[2048] = {};
+            DWORD read;
+            ReadFile(hFile, buf, size, &read, NULL);
+            char* p = buf;
+            while (*p) {
+                char* nl = strchr(p, '\n');
+                if (!nl) nl = p + strlen(p);
+                *nl = '\0';
+                if (strncmp(p, "hk_", 3) != 0) {
+                    if (sscanf(p, "autoplay=%d", &m_settingsAutoplay) == 1) {}
+                    else if (sscanf(p, "remember_progress=%d", &m_settingsRememberProgress) == 1) {}
+                    else if (sscanf(p, "tray_minimize=%d", &m_settingsTray) == 1) {}
+                }
                 p = nl + 1;
             }
         }
@@ -1123,7 +1491,7 @@ private:
     }
 
     // ==========================================
-    // Last song progress (.lastsong.txt)
+    // Last song progress
     // ==========================================
     void SaveLastSong() {
         if (m_currentIndex < 0 || !m_audio.IsLoaded()) return;
@@ -1134,19 +1502,15 @@ private:
         DWORD written;
         const WORD bom = 0xFEFF;
         WriteFile(hFile, &bom, 2, &written, NULL);
-
         wchar_t buf[64];
         swprintf(buf, 64, L"%d\n", m_currentIndex);
         WriteFile(hFile, buf, (DWORD)(wcslen(buf) * sizeof(wchar_t)), &written, NULL);
-
         double pos = m_audio.GetPosition();
         swprintf(buf, 64, L"%.3f\n", pos);
         WriteFile(hFile, buf, (DWORD)(wcslen(buf) * sizeof(wchar_t)), &written, NULL);
-
         const std::wstring& path = m_playlist.GetFile(m_currentIndex);
         std::wstring line = path + L"\n";
         WriteFile(hFile, line.c_str(), (DWORD)(line.size() * sizeof(wchar_t)), &written, NULL);
-
         CloseHandle(hFile);
     }
 
@@ -1164,48 +1528,36 @@ private:
             ReadFile(hFile, &buf[0], size, &read, NULL);
             buf[read / 2] = L'\0';
             CloseHandle(hFile);
-
             const wchar_t* p = buf.c_str();
             if (*p == 0xFEFF) p++;
-
             const wchar_t* nl1 = wcschr(p, L'\n');
             if (!nl1) return false;
             int savedIndex = _wtoi(std::wstring(p, nl1 - p).c_str());
             p = nl1 + 1;
-
             const wchar_t* nl2 = wcschr(p, L'\n');
             if (!nl2) return false;
             double savedPos = _wtof(std::wstring(p, nl2 - p).c_str());
             p = nl2 + 1;
-
             const wchar_t* nl3 = wcschr(p, L'\n');
             size_t pathLen = nl3 ? (size_t)(nl3 - p) : wcslen(p);
             if (pathLen > 0 && p[pathLen-1] == L'\r') --pathLen;
             std::wstring savedPath(p, pathLen);
-
             if (!savedPath.empty()) {
                 for (int i = 0; i < m_playlist.GetCount(); i++) {
                     if (m_playlist.GetFile(i) == savedPath) {
                         PlayFile(i);
-                        if (savedPos > 0) {
-                            m_audio.SetPosition(savedPos);
-                        }
+                        if (savedPos > 0) m_audio.SetPosition(savedPos);
                         loaded = true;
                         break;
                     }
                 }
             }
-
             if (!loaded && savedIndex >= 0 && savedIndex < m_playlist.GetCount()) {
                 PlayFile(savedIndex);
-                if (savedPos > 0) {
-                    m_audio.SetPosition(savedPos);
-                }
+                if (savedPos > 0) m_audio.SetPosition(savedPos);
                 loaded = true;
             }
-        } else {
-            CloseHandle(hFile);
-        }
+        } else { CloseHandle(hFile); }
         return loaded;
     }
 
@@ -1223,8 +1575,7 @@ private:
         WriteFile(hFile, &bom, 2, &written, NULL);
         for (int i = 0; i < m_playlist.GetCount(); i++) {
             std::wstring line = m_playlist.GetFile(i) + L"\n";
-            WriteFile(hFile, line.c_str(),
-                (DWORD)(line.size() * sizeof(wchar_t)), &written, NULL);
+            WriteFile(hFile, line.c_str(), (DWORD)(line.size() * sizeof(wchar_t)), &written, NULL);
         }
         CloseHandle(hFile);
     }
@@ -1234,7 +1585,6 @@ private:
         HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
             FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile == INVALID_HANDLE_VALUE) return;
-
         DWORD size = GetFileSize(hFile, NULL);
         if (size > 2) {
             DWORD read = 0;
@@ -1243,7 +1593,6 @@ private:
             buf[read / 2] = L'\0';
             const wchar_t* p = buf.c_str();
             if (*p == 0xFEFF) p++;
-
             m_playlist.Clear();
             while (*p) {
                 const wchar_t* nl = wcschr(p, L'\n');
@@ -1285,7 +1634,6 @@ private:
         HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
             FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile == INVALID_HANDLE_VALUE) return false;
-
         DWORD size = GetFileSize(hFile, NULL);
         bool loaded = false;
         if (size > 2) {
@@ -1297,7 +1645,6 @@ private:
             if (*p == 0xFEFF) p++;
             size_t len = wcslen(p);
             while (len > 0 && (p[len-1] == L'\n' || p[len-1] == L'\r')) --len;
-
             if (len > 0) {
                 std::wstring folder(p, len);
                 if (GetFileAttributesW(folder.c_str()) != INVALID_FILE_ATTRIBUTES &&
@@ -1353,6 +1700,16 @@ private:
     }
 };
 
+// ==========================================
+// Hotkey dialog procedure (minimal — unused, we handle everything inline)
+// ==========================================
+static INT_PTR CALLBACK HotkeyDlgProc(HWND, UINT, WPARAM, LPARAM) {
+    return FALSE;
+}
+
+// ==========================================
+// WinMain
+// ==========================================
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     InitCommonControls();

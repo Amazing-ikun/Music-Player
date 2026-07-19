@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake --build . --target MusicPlayer -j 14)"
+    ]
+  }
+}

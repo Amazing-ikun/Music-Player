@@ -1,0 +1,1018 @@
+#define WIN32_LEAN_AND_MEAN
+#define UNICODE
+#define _UNICODE
+#include <windows.h>
+#include <commctrl.h>
+#include <shlobj.h>
+#include <cstdio>
+#include <cstdlib>
+#include <ctime>
+#include <string>
+#include <vector>
+#include <algorithm>
+
+#include "Resource.h"
+#include "AudioEngine.h"
+#include "PlaylistManager.h"
+
+// ============================================
+// Constants
+// ============================================
+namespace {
+    const wchar_t CLASS_NAME[]  = L"MusicPlayerClass";
+    const wchar_t WINDOW_TITLE[] = L"本地音乐播放器";
+    constexpr int MIN_W = 680;
+    constexpr int MIN_H = 400;
+    constexpr int SEEK_RES = 10000;
+    constexpr int LV_ROW_HEIGHT = 36;
+}
+
+static std::wstring FormatTime(double seconds) {
+    if (seconds < 0) seconds = 0;
+    int total = (int)seconds;
+    int h = total / 3600;
+    int m = (total % 3600) / 60;
+    int s = total % 60;
+    wchar_t buf[24];
+    if (h > 0) swprintf(buf, 24, L"%d:%02d:%02d", h, m, s);
+    else       swprintf(buf, 24, L"%02d:%02d", m, s);
+    return buf;
+}
+
+static std::wstring FormatDuration(double seconds) {
+    if (seconds <= 0) return L"--:--";
+    return FormatTime(seconds);
+}
+
+static std::wstring GetDisplayName(const std::wstring& path) {
+    size_t pos = path.rfind(L'\\');
+    if (pos == std::wstring::npos) pos = path.rfind(L'/');
+    std::wstring file = (pos == std::wstring::npos) ? path : path.substr(pos + 1);
+    size_t dot = file.rfind(L'.');
+    if (dot != std::wstring::npos) {
+        std::wstring ext = file.substr(dot);
+        for (auto& c : ext) c = towlower(c);
+        if (ext == L".mp3" || ext == L".flac" || ext == L".wav")
+            file = file.substr(0, dot);
+    }
+    return file;
+}
+
+static std::wstring GetExeDirectory() {
+    wchar_t path[MAX_PATH];
+    GetModuleFileNameW(NULL, path, MAX_PATH);
+    wchar_t* last = wcsrchr(path, L'\\');
+    if (last) *last = L'\0';
+    return path;
+}
+
+// ============================================
+// Column header labels
+// ============================================
+static const wchar_t* COL_LABELS[4] = { L"#", L"标题", L"专辑", L"时长" };
+static const int COL_WIDTHS[4] = { 40, 280, 180, 80 };
+
+// ============================================
+// MainWindow
+// ============================================
+class MainWindow {
+public:
+    MainWindow()
+        : m_hwnd(NULL), m_hInst(NULL)
+        , m_playlistLV(NULL)
+        , m_btnPrev(NULL), m_btnPlay(NULL), m_btnNext(NULL), m_btnMode(NULL)
+        , m_trackSeek(NULL), m_sliderVol(NULL), m_staticVolPct(NULL)
+        , m_staticTime(NULL), m_staticSong(NULL)
+        , m_currentIndex(-1), m_userDraggingSeek(false)
+        , m_sortColumn(-1), m_sortAscending(true)
+        , m_hFontSmall(NULL)
+    {
+        srand((unsigned)time(NULL));
+    }
+
+    bool Create(HINSTANCE hInst, int nCmdShow) {
+        m_hInst = hInst;
+
+        WNDCLASSEXW wc = {};
+        wc.cbSize        = sizeof(wc);
+        wc.style         = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc   = StaticWndProc;
+        wc.hInstance     = hInst;
+        wc.hIcon         = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
+        wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = CLASS_NAME;
+        wc.hIconSm       = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
+
+        if (!RegisterClassExW(&wc)) return false;
+
+        RECT rc = { 0, 0, 860, 520 };
+        AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, TRUE);
+
+        m_hwnd = CreateWindowExW(0, CLASS_NAME, WINDOW_TITLE,
+            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+            CW_USEDEFAULT, CW_USEDEFAULT,
+            rc.right - rc.left, rc.bottom - rc.top,
+            NULL, NULL, hInst, this);
+
+        if (!m_hwnd) return false;
+
+        CenterWindow();
+        ShowWindow(m_hwnd, nCmdShow);
+        UpdateWindow(m_hwnd);
+        return true;
+    }
+
+    HWND GetHWND() const { return m_hwnd; }
+
+private:
+    // ---- Controls ----
+    HWND m_hwnd;
+    HINSTANCE m_hInst;
+    HWND m_playlistLV;
+    HWND m_btnPrev, m_btnPlay, m_btnNext, m_btnMode;
+    HWND m_trackSeek, m_sliderVol, m_staticVolPct;
+    HWND m_staticTime, m_staticSong;
+
+    // ---- State ----
+    AudioEngine      m_audio;
+    PlaylistManager  m_playlist;
+    int              m_currentIndex;
+    bool             m_userDraggingSeek;
+    int              m_sortColumn;
+    bool             m_sortAscending;
+    HFONT            m_hFontSmall;
+
+    // ---- Font ----
+    HFONT m_hFont;
+
+    static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+        MainWindow* win = (MainWindow*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+        if (msg == WM_NCCREATE) {
+            CREATESTRUCT* cs = (CREATESTRUCT*)lp;
+            win = (MainWindow*)cs->lpCreateParams;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)win);
+        }
+        if (win) {
+            if (!win->m_hwnd) win->m_hwnd = hwnd;
+            return win->HandleMessage(msg, wp, lp);
+        }
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+
+    LRESULT HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
+        switch (msg) {
+            case WM_CREATE:            OnCreate();                  return 0;
+            case WM_DESTROY:           PostQuitMessage(0);          return 0;
+            case WM_CLOSE:             OnClose();                   return 0;
+            case WM_SIZE:              OnSize(LOWORD(lp), HIWORD(lp)); return 0;
+            case WM_GETMINMAXINFO:     OnMinMaxInfo((MINMAXINFO*)lp);  return 0;
+            case WM_COMMAND:           OnCommand(wp, lp);            return 0;
+            case WM_HSCROLL:           OnHScroll(wp, lp);            return 0;
+            case WM_TIMER:             if (wp == TIMER_ID_SEEK) OnTimer(); return 0;
+            case WM_NOTIFY:            return OnNotify(wp, lp);
+            default:
+                if (msg == WM_USER_SONG_END) { OnSongEnd(); return 0; }
+                return DefWindowProcW(m_hwnd, msg, wp, lp);
+        }
+    }
+
+    // ==========================================
+    // OnCreate
+    // ==========================================
+    void OnCreate() {
+        INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_WIN95_CLASSES };
+        InitCommonControlsEx(&icc);
+        CreateMenuBar();
+        CreateControls();
+
+        if (!m_audio.Initialize(m_hwnd)) {
+            MessageBoxW(m_hwnd,
+                L"无法初始化音频引擎 (bass.dll)。\n\n"
+                L"请确保 bass.dll 位于程序目录或系统路径中。\n"
+                L"下载地址: https://www.un4seen.com/bass.html",
+                L"音频初始化失败", MB_OK | MB_ICONWARNING);
+        }
+
+        if (!LoadFromLastFolder()) {
+            LoadPlaylist();
+        }
+        LoadVolume();
+        m_audio.SetNotifyWindow(m_hwnd, WM_USER_SONG_END);
+        UpdateUI();
+    }
+
+    void OnClose() {
+        SavePlaylist();
+        SaveVolume();
+        m_audio.Cleanup();
+        DestroyWindow(m_hwnd);
+    }
+
+    // ==========================================
+    // Menu bar
+    // ==========================================
+    void CreateMenuBar() {
+        HMENU bar = CreateMenu();
+        HMENU fileMenu = CreatePopupMenu();
+        AppendMenuW(fileMenu, MF_STRING, ID_FILE_OPENFOLDER, L"打开文件夹(&O)...");
+        AppendMenuW(fileMenu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(fileMenu, MF_STRING, ID_FILE_EXIT, L"退出(&X)");
+        AppendMenuW(bar, MF_POPUP, (UINT_PTR)fileMenu, L"文件(&F)");
+
+        HMENU playMenu = CreatePopupMenu();
+        AppendMenuW(playMenu, MF_STRING | MF_CHECKED, ID_PLAY_SEQUENTIAL, L"顺序播放(&S)");
+        AppendMenuW(playMenu, MF_STRING, ID_PLAY_REPEATONE, L"单曲循环(&R)");
+        AppendMenuW(playMenu, MF_STRING, ID_PLAY_SHUFFLE, L"随机播放(&H)");
+        AppendMenuW(bar, MF_POPUP, (UINT_PTR)playMenu, L"播放(&P)");
+        SetMenu(m_hwnd, bar);
+    }
+
+    // ==========================================
+    // Create controls
+    // ==========================================
+    void CreateControls() {
+        NONCLIENTMETRICSW ncm = { sizeof(ncm) };
+        SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
+        m_hFont = CreateFontIndirectW(&ncm.lfMenuFont);
+        m_hFontSmall = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"微软雅黑");
+
+        // ---- Playlist (ListView) ----
+        m_playlistLV = CreateWindowExW(0, WC_LISTVIEWW, NULL,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER |
+            LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL,
+            0, 0, 0, 0, m_hwnd, (HMENU)IDC_PLAYLIST, m_hInst, NULL);
+
+        ListView_SetExtendedListViewStyle(m_playlistLV,
+            LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT | LVS_EX_HEADERDRAGDROP);
+
+        // Set row height via empty image list
+        HIMAGELIST himl = ImageList_Create(1, LV_ROW_HEIGHT, ILC_COLOR32, 1, 1);
+        ListView_SetImageList(m_playlistLV, himl, LVSIL_SMALL);
+
+        // Create columns
+        LVCOLUMNW lc = {};
+        lc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
+        lc.fmt  = LVCFMT_LEFT;
+        for (int i = 0; i < 4; i++) {
+            lc.cx = COL_WIDTHS[i];
+            lc.pszText = (LPWSTR)COL_LABELS[i];
+            ListView_InsertColumn(m_playlistLV, i, &lc);
+        }
+
+        // ---- Control buttons ----
+        m_btnMode = CreateWindowExW(0, L"BUTTON", L"顺序播放",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            0, 0, 0, 0, m_hwnd, (HMENU)IDC_BTN_MODE, m_hInst, NULL);
+        m_btnPrev = CreateWindowExW(0, L"BUTTON", L"⏮",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            0, 0, 0, 0, m_hwnd, (HMENU)IDC_BTN_PREV, m_hInst, NULL);
+        m_btnPlay = CreateWindowExW(0, L"BUTTON", L"▶",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            0, 0, 0, 0, m_hwnd, (HMENU)IDC_BTN_PLAY, m_hInst, NULL);
+        m_btnNext = CreateWindowExW(0, L"BUTTON", L"⏭",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            0, 0, 0, 0, m_hwnd, (HMENU)IDC_BTN_NEXT, m_hInst, NULL);
+
+        // ---- Volume slider + percentage label ----
+        m_staticVolPct = CreateWindowExW(0, L"STATIC", L"80%",
+            WS_CHILD | WS_VISIBLE | SS_CENTER,
+            0, 0, 0, 0, m_hwnd, (HMENU)IDC_STAT_VOL, m_hInst, NULL);
+
+        m_sliderVol = CreateWindowExW(0, TRACKBAR_CLASSW, NULL,
+            WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_FIXEDLENGTH | TBS_NOTICKS,
+            0, 0, 0, 0, m_hwnd, (HMENU)IDC_SLIDER_VOL, m_hInst, NULL);
+        SendMessageW(m_sliderVol, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
+        SendMessageW(m_sliderVol, TBM_SETPOS, TRUE, 80);
+        SendMessageW(m_sliderVol, TBM_SETPAGESIZE, 0, 10);
+
+        // ---- Seek ----
+        m_trackSeek = CreateWindowExW(0, TRACKBAR_CLASSW, NULL,
+            WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_FIXEDLENGTH | TBS_NOTICKS,
+            0, 0, 0, 0, m_hwnd, (HMENU)IDC_TRACK_SEEK, m_hInst, NULL);
+        SendMessageW(m_trackSeek, TBM_SETRANGE, TRUE, MAKELPARAM(0, SEEK_RES));
+        SendMessageW(m_trackSeek, TBM_SETPOS, TRUE, 0);
+        SendMessageW(m_trackSeek, TBM_SETPAGESIZE, 0, SEEK_RES / 20);
+
+        // ---- Status ----
+        m_staticTime = CreateWindowExW(0, L"STATIC", L"00:00 / 00:00",
+            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
+            m_hwnd, (HMENU)IDC_STAT_TIME, m_hInst, NULL);
+        m_staticSong = CreateWindowExW(0, L"STATIC", L"就绪",
+            WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
+            0, 0, 0, 0, m_hwnd, (HMENU)IDC_STAT_SONG, m_hInst, NULL);
+
+        // Apply font
+        HWND ctls[] = { m_btnMode, m_btnPrev, m_btnPlay, m_btnNext,
+                        m_sliderVol, m_trackSeek, m_staticVolPct,
+                        m_staticTime, m_staticSong };
+        for (auto c : ctls) SendMessageW(c, WM_SETFONT, (WPARAM)m_hFont, TRUE);
+        SendMessageW(m_playlistLV, WM_SETFONT, (WPARAM)m_hFont, TRUE);
+
+        LayoutControls();
+    }
+
+    // ==========================================
+    // Layout
+    // ==========================================
+    void LayoutControls() {
+        RECT rc;
+        GetClientRect(m_hwnd, &rc);
+        int w = rc.right, h = rc.bottom;
+        const int M = 8;
+        const int ctrlAreaH = 118;
+        int listH = h - ctrlAreaH;
+        if (listH < 30) listH = 30;
+
+        SetWindowPos(m_playlistLV, NULL, M, M, w - 2 * M, listH - 2 * M, SWP_NOZORDER);
+
+        int y = listH;
+        const int BH = 28;
+
+        SetWindowPos(m_btnMode, NULL, M, y + 2, 90, BH, SWP_NOZORDER);
+        int bx = M + 96;
+        SetWindowPos(m_btnPrev, NULL, bx, y + 2, 36, BH, SWP_NOZORDER);
+        bx += 42;
+        SetWindowPos(m_btnPlay, NULL, bx, y + 2, 36, BH, SWP_NOZORDER);
+        bx += 42;
+        SetWindowPos(m_btnNext, NULL, bx, y + 2, 36, BH, SWP_NOZORDER);
+
+        int volPctW = 36;
+        int volW = 130;
+        int volX = w - M - volPctW - volW;
+        SetWindowPos(m_staticVolPct, NULL, volX, y + 4, volPctW, 20, SWP_NOZORDER);
+        SetWindowPos(m_sliderVol, NULL, volX + volPctW, y + 2, volW, BH, SWP_NOZORDER);
+
+        y += BH + 6;
+        SetWindowPos(m_trackSeek, NULL, M, y + 2, w - 2 * M, 24, SWP_NOZORDER);
+
+        y += 28;
+        int timeW = 170;
+        SetWindowPos(m_staticTime, NULL, M, y + 2, timeW, 20, SWP_NOZORDER);
+        SetWindowPos(m_staticSong, NULL, M + timeW + 8, y + 2,
+                     w - M - timeW - 16, 20, SWP_NOZORDER);
+    }
+
+    void CenterWindow() {
+        RECT rc;
+        GetWindowRect(m_hwnd, &rc);
+        int sw = GetSystemMetrics(SM_CXSCREEN);
+        int sh = GetSystemMetrics(SM_CYSCREEN);
+        SetWindowPos(m_hwnd, NULL,
+            (sw - (rc.right - rc.left)) / 2,
+            (sh - (rc.bottom - rc.top)) / 2,
+            0, 0, SWP_NOSIZE | SWP_NOZORDER);
+    }
+
+    void OnSize(int, int) { LayoutControls(); }
+    void OnMinMaxInfo(MINMAXINFO* mmi) {
+        mmi->ptMinTrackSize.x = MIN_W;
+        mmi->ptMinTrackSize.y = MIN_H;
+    }
+
+    // ==========================================
+    // WM_COMMAND
+    // ==========================================
+    void OnCommand(WPARAM wp, LPARAM lp) {
+        WORD id = LOWORD(wp);
+        HWND hCtrl = (HWND)lp;
+
+        if (hCtrl == NULL) {
+            switch (id) {
+                case ID_FILE_OPENFOLDER: OpenFolder(); break;
+                case ID_FILE_EXIT:       SendMessageW(m_hwnd, WM_CLOSE, 0, 0); break;
+                case ID_PLAY_SEQUENTIAL: SetPlayMode(PlayMode::Sequential); break;
+                case ID_PLAY_REPEATONE:  SetPlayMode(PlayMode::RepeatOne);  break;
+                case ID_PLAY_SHUFFLE:    SetPlayMode(PlayMode::Shuffle);    break;
+            }
+        } else {
+            WORD code = HIWORD(wp);
+            if (code == BN_CLICKED) {
+                if      (hCtrl == m_btnPlay) OnPlayPause();
+                else if (hCtrl == m_btnPrev) OnPrev();
+                else if (hCtrl == m_btnNext) OnNext();
+                else if (hCtrl == m_btnMode) OnCycleMode();
+            }
+        }
+    }
+
+    // ==========================================
+    // WM_HSCROLL
+    // ==========================================
+    void OnHScroll(WPARAM wp, LPARAM lp) {
+        HWND hCtrl = (HWND)lp;
+        WORD code = LOWORD(wp);
+
+        if (hCtrl == m_trackSeek) {
+            int pos = (int)SendMessageW(m_trackSeek, TBM_GETPOS, 0, 0);
+            double len = m_audio.GetLength();
+            if (code == TB_THUMBTRACK) {
+                m_userDraggingSeek = true;
+                if (len > 0) {
+                    double p = len * pos / SEEK_RES;
+                    SetWindowTextW(m_staticTime,
+                        (FormatTime(p) + L" / " + FormatTime(len)).c_str());
+                }
+            } else {
+                if (len > 0) {
+                    m_audio.SetPosition(len * pos / SEEK_RES);
+                    UpdateTimeDisplay();
+                }
+                if (code == TB_ENDTRACK) m_userDraggingSeek = false;
+            }
+        } else if (hCtrl == m_sliderVol) {
+            int vol = (int)SendMessageW(m_sliderVol, TBM_GETPOS, 0, 0);
+            m_audio.SetVolume(vol);
+            UpdateVolLabel();
+        }
+    }
+
+    // ==========================================
+    // WM_NOTIFY (ListView events)
+    // ==========================================
+    LRESULT OnNotify(WPARAM, LPARAM lp) {
+        LPNMHDR nmh = (LPNMHDR)lp;
+
+        if (nmh->hwndFrom == m_playlistLV) {
+            switch (nmh->code) {
+                case NM_CUSTOMDRAW: {
+                    LPNMLVCUSTOMDRAW cd = (LPNMLVCUSTOMDRAW)lp;
+                    return OnLVCustomDraw(cd);
+                }
+                case LVN_COLUMNCLICK: {
+                    LPNMLISTVIEW lv = (LPNMLISTVIEW)lp;
+                    OnLVColumnClick(lv->iSubItem);
+                    return 0;
+                }
+                case NM_DBLCLK: {
+                    LPNMITEMACTIVATE ia = (LPNMITEMACTIVATE)lp;
+                    if (ia->iItem >= 0) PlayFile(ia->iItem);
+                    return 0;
+                }
+            }
+        }
+        return 0;
+    }
+
+    // ==========================================
+    // ListView custom draw (title + artist two-line)
+    // ==========================================
+    LRESULT OnLVCustomDraw(LPNMLVCUSTOMDRAW cd) {
+        switch (cd->nmcd.dwDrawStage) {
+            case CDDS_PREPAINT:
+                return CDRF_NOTIFYITEMDRAW;
+            case CDDS_ITEMPREPAINT:
+                return CDRF_NOTIFYSUBITEMDRAW;
+            case (CDDS_ITEMPREPAINT | CDDS_SUBITEM):
+                if (cd->iSubItem == 1) {
+                    int iItem = (int)cd->nmcd.dwItemSpec;
+                    if (iItem >= 0 && iItem < m_playlist.GetCount()) {
+                        const auto& song = m_playlist.GetSong(iItem);
+                        HDC dc = cd->nmcd.hdc;
+                        RECT rc = cd->nmcd.rc;
+                        RECT rcClip;
+                        GetClipBox(dc, &rcClip);
+
+                        // Background
+                        bool sel = (cd->nmcd.uItemState & CDIS_SELECTED);
+                        if (sel) {
+                            FillRect(dc, &rc, GetSysColorBrush(COLOR_HIGHLIGHT));
+                            SetTextColor(dc, GetSysColor(COLOR_HIGHLIGHTTEXT));
+                        } else {
+                            FillRect(dc, &rc, GetSysColorBrush(COLOR_WINDOW));
+                            SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+                        }
+
+                        SetBkMode(dc, TRANSPARENT);
+                        rc.left += 6;
+
+                        // Title
+                        HFONT old = (HFONT)SelectObject(dc, m_hFont);
+                        RECT rcT = rc;
+                        rcT.bottom = rc.top + 20;
+                        DrawTextW(dc, song.title.c_str(), -1, &rcT,
+                            DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+                        // Artist (smaller font, gray text)
+                        if (!song.artist.empty()) {
+                            SelectObject(dc, m_hFontSmall);
+                            if (!sel) SetTextColor(dc, RGB(120, 120, 120));
+                            RECT rcA = rc;
+                            rcA.top = rc.top + 20;
+                            DrawTextW(dc, song.artist.c_str(), -1, &rcA,
+                                DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+                            if (!sel) SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+                        }
+
+                        SelectObject(dc, old);
+                        return CDRF_SKIPDEFAULT;
+                    }
+                }
+                return CDRF_DODEFAULT;
+        }
+        return CDRF_DODEFAULT;
+    }
+
+    // ==========================================
+    // ListView column click sorting
+    // ==========================================
+    void OnLVColumnClick(int column) {
+        // Toggle direction if same column
+        if (column == m_sortColumn)
+            m_sortAscending = !m_sortAscending;
+        else {
+            m_sortColumn = column;
+            m_sortAscending = (column != 3); // 时长默认降序
+        }
+
+        // Remember current song for index tracking
+        std::wstring curPath;
+        if (m_currentIndex >= 0 && m_currentIndex < m_playlist.GetCount())
+            curPath = m_playlist.GetFile(m_currentIndex);
+
+        m_playlist.Sort(column, m_sortAscending);
+
+        // Update column headers with sort indicator
+        for (int i = 0; i < 4; i++) {
+            std::wstring label = COL_LABELS[i];
+            if (i == column)
+                label += m_sortAscending ? L" ▲" : L" ▼";
+            LVCOLUMNW lc = {};
+            lc.mask = LVCF_TEXT;
+            lc.pszText = &label[0];
+            ListView_SetColumn(m_playlistLV, i, &lc);
+        }
+
+        // Refresh items
+        RefreshPlaylistUI();
+
+        // Restore current song selection
+        if (!curPath.empty()) {
+            for (int i = 0; i < m_playlist.GetCount(); i++) {
+                if (m_playlist.GetFile(i) == curPath) {
+                    m_currentIndex = i;
+                    ListView_SetItemState(m_playlistLV, i, LVIS_SELECTED | LVIS_FOCUSED,
+                                          LVIS_SELECTED | LVIS_FOCUSED);
+                    break;
+                }
+            }
+        }
+    }
+
+    // ==========================================
+    // Timer
+    // ==========================================
+    void OnTimer() {
+        if (m_audio.IsLoaded() && !m_userDraggingSeek) {
+            UpdateSeekDisplay();
+            UpdateTimeDisplay();
+        }
+    }
+
+    // ==========================================
+    // Song end
+    // ==========================================
+    void OnSongEnd() {
+        KillTimer(m_hwnd, TIMER_ID_SEEK);
+        m_audio.NotifyEndOfSong();
+
+        int count = m_playlist.GetCount();
+        if (count == 0) return;
+
+        int next = -1;
+        switch (m_audio.GetPlayMode()) {
+            case PlayMode::RepeatOne: next = m_currentIndex; break;
+            case PlayMode::Shuffle:   next = rand() % count; break;
+            case PlayMode::Sequential:
+            default:
+                if (m_currentIndex + 1 < count) next = m_currentIndex + 1;
+                break;
+        }
+
+        if (next >= 0 && next < count) {
+            PlayFile(next);
+        } else {
+            m_currentIndex = -1;
+            SetWindowTextW(m_staticSong, L"播放完毕");
+            SetWindowTextW(m_staticTime, L"00:00 / 00:00");
+            SendMessageW(m_trackSeek, TBM_SETPOS, TRUE, 0);
+            EnableWindow(m_trackSeek, FALSE);
+            UpdateUI();
+        }
+    }
+
+    // ==========================================
+    // Open folder
+    // ==========================================
+    void OpenFolder() {
+        BROWSEINFOW bi = {};
+        bi.hwndOwner = m_hwnd;
+        bi.lpszTitle = L"选择音乐文件夹";
+        bi.ulFlags   = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_NONEWFOLDERBUTTON;
+
+        LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+        if (!pidl) return;
+
+        wchar_t path[MAX_PATH];
+        if (SHGetPathFromIDListW(pidl, path)) {
+            m_audio.Unload();
+            KillTimer(m_hwnd, TIMER_ID_SEEK);
+            m_currentIndex = -1;
+            m_userDraggingSeek = false;
+            m_sortColumn = -1;
+
+            SaveLastFolder(path);
+            m_playlist.ScanFolder(path);
+            RefreshPlaylistUI();
+
+            if (!m_playlist.IsEmpty()) {
+                PlayFile(0);
+            } else {
+                SetWindowTextW(m_staticSong, L"所选文件夹中没有找到音频文件 (MP3/FLAC/WAV)");
+                UpdateUI();
+            }
+        }
+        CoTaskMemFree(pidl);
+    }
+
+    // ==========================================
+    // Playback controls
+    // ==========================================
+    void OnPlayPause() {
+        if (!m_audio.IsLoaded()) return;
+        if (m_audio.IsPlaying()) {
+            m_audio.Pause();
+            SetWindowTextW(m_staticSong, L"已暂停");
+        } else {
+            m_audio.Play();
+            if (m_currentIndex >= 0 && m_currentIndex < m_playlist.GetCount()) {
+                std::wstring meta = m_audio.GetFormattedMetadata();
+                const auto& path = m_playlist.GetFile(m_currentIndex);
+                if (!meta.empty())
+                    SetWindowTextW(m_staticSong, (L"正在播放: " + meta).c_str());
+                else
+                    SetWindowTextW(m_staticSong, (L"正在播放: " + GetDisplayName(path)).c_str());
+            }
+            SetTimer(m_hwnd, TIMER_ID_SEEK, 500, NULL);
+        }
+        UpdatePlayButton();
+    }
+
+    void OnPrev() {
+        int count = m_playlist.GetCount();
+        if (count == 0) return;
+        int idx = (m_currentIndex <= 0) ? count - 1 : m_currentIndex - 1;
+        PlayFile(idx);
+    }
+
+    void OnNext() {
+        int count = m_playlist.GetCount();
+        if (count == 0) return;
+        int idx;
+        if (m_audio.GetPlayMode() == PlayMode::Shuffle)
+            idx = rand() % count;
+        else
+            idx = (m_currentIndex + 1) % count;
+        PlayFile(idx);
+    }
+
+    // ==========================================
+    // Play mode
+    // ==========================================
+    void OnCycleMode() { m_audio.CyclePlayMode(); UpdateModeUI(); }
+    void SetPlayMode(PlayMode mode) { m_audio.SetPlayMode(mode); UpdateModeUI(); }
+
+    void UpdateModeUI() {
+        PlayMode pm = m_audio.GetPlayMode();
+        const wchar_t* labels[] = { L"顺序播放", L"单曲循环", L"随机播放" };
+        SetWindowTextW(m_btnMode, labels[(int)pm]);
+
+        HMENU bar = GetMenu(m_hwnd);
+        HMENU pmMenu = GetSubMenu(bar, 1);
+        CheckMenuItem(pmMenu, ID_PLAY_SEQUENTIAL,
+            MF_BYCOMMAND | (pm == PlayMode::Sequential ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(pmMenu, ID_PLAY_REPEATONE,
+            MF_BYCOMMAND | (pm == PlayMode::RepeatOne ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(pmMenu, ID_PLAY_SHUFFLE,
+            MF_BYCOMMAND | (pm == PlayMode::Shuffle ? MF_CHECKED : MF_UNCHECKED));
+    }
+
+    // ==========================================
+    // Play file
+    // ==========================================
+    void PlayFile(int index) {
+        if (index < 0 || index >= m_playlist.GetCount()) return;
+
+        KillTimer(m_hwnd, TIMER_ID_SEEK);
+        const std::wstring& path = m_playlist.GetFile(index);
+
+        if (!m_audio.Load(path)) {
+            SetWindowTextW(m_staticSong,
+                (L"无法加载: " + GetDisplayName(path)).c_str());
+            return;
+        }
+
+        m_currentIndex = index;
+        m_audio.Play();
+        UpdateUI();
+        UpdatePlaylistSelection();
+
+        // Read metadata from BASS and update SongInfo
+        double len = m_audio.GetLength();
+        std::wstring meta = m_audio.GetFormattedMetadata();
+
+        // Parse "Artist - Title" format from GetFormattedMetadata
+        std::wstring artist, title;
+        size_t dash = meta.find(L" - ");
+        if (dash != std::wstring::npos) {
+            artist = meta.substr(0, dash);
+            title  = meta.substr(dash + 3);
+        }
+
+        // Update SongInfo with BASS metadata
+        m_playlist.UpdateMetadata(index, artist, title, L"", len);
+
+        // Update the list view items for this index
+        UpdateLVItem(index);
+
+        if (!meta.empty())
+            SetWindowTextW(m_staticSong, (L"正在播放: " + meta).c_str());
+        else
+            SetWindowTextW(m_staticSong, (L"正在播放: " + GetDisplayName(path)).c_str());
+
+        SetTimer(m_hwnd, TIMER_ID_SEEK, 500, NULL);
+    }
+
+    // ==========================================
+    // UI helpers
+    // ==========================================
+    void UpdateUI() {
+        bool loaded = m_audio.IsLoaded();
+        bool hasItems = !m_playlist.IsEmpty();
+        EnableWindow(m_btnPlay,  loaded);
+        EnableWindow(m_btnPrev,  hasItems);
+        EnableWindow(m_btnNext,  hasItems);
+        EnableWindow(m_trackSeek, loaded);
+        EnableWindow(m_sliderVol, loaded);
+        UpdatePlayButton();
+        UpdateModeUI();
+        UpdateVolLabel();
+        if (!loaded) {
+            UpdateSeekDisplay();
+            UpdateTimeDisplay();
+        }
+    }
+
+    void UpdatePlayButton() {
+        SetWindowTextW(m_btnPlay, m_audio.IsPlaying() ? L"⏸" : L"▶");
+    }
+
+    void UpdateVolLabel() {
+        int vol = (int)SendMessageW(m_sliderVol, TBM_GETPOS, 0, 0);
+        wchar_t buf[16];
+        swprintf(buf, 16, L"%d%%", vol);
+        SetWindowTextW(m_staticVolPct, buf);
+    }
+
+    void UpdateSeekDisplay() {
+        double len = m_audio.GetLength();
+        double pos = m_audio.GetPosition();
+        if (len > 0)
+            SendMessageW(m_trackSeek, TBM_SETPOS, TRUE, (int)(pos / len * SEEK_RES));
+    }
+
+    void UpdateTimeDisplay() {
+        double len = m_audio.GetLength();
+        double pos = m_audio.GetPosition();
+        SetWindowTextW(m_staticTime,
+            (FormatTime(pos) + L" / " + FormatTime(len)).c_str());
+    }
+
+    void UpdatePlaylistSelection() {
+        ListView_SetItemState(m_playlistLV, m_currentIndex,
+            LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+        ListView_EnsureVisible(m_playlistLV, m_currentIndex, FALSE);
+    }
+
+    // ---- ListView item management ----
+    void UpdateLVItem(int index) {
+        if (index < 0 || index >= m_playlist.GetCount()) return;
+        const auto& song = m_playlist.GetSong(index);
+
+        // # column
+        wchar_t num[16];
+        swprintf(num, 16, L"%d", index + 1);
+        ListView_SetItemText(m_playlistLV, index, 0, num);
+
+        // Title column (custom drawn, but set text for accessibility)
+        std::wstring display = song.title;
+        if (!song.artist.empty())
+            display = song.title + L" - " + song.artist;
+        ListView_SetItemText(m_playlistLV, index, 1, &display[0]);
+
+        // Album column
+        std::wstring alb = song.album.empty() ? L"" : song.album;
+        ListView_SetItemText(m_playlistLV, index, 2, &alb[0]);
+
+        // Duration column
+        std::wstring dur = FormatDuration(song.duration);
+        ListView_SetItemText(m_playlistLV, index, 3, &dur[0]);
+    }
+
+    void RefreshPlaylistUI() {
+        SendMessageW(m_playlistLV, WM_SETREDRAW, FALSE, 0);
+        ListView_DeleteAllItems(m_playlistLV);
+
+        LVITEMW li = {};
+        li.mask = LVIF_TEXT;
+        for (int i = 0; i < m_playlist.GetCount(); i++) {
+            li.iItem = i;
+            ListView_InsertItem(m_playlistLV, &li);
+            UpdateLVItem(i);
+        }
+
+        // Restore sort column headers
+        if (m_sortColumn >= 0) {
+            for (int i = 0; i < 4; i++) {
+                std::wstring label = COL_LABELS[i];
+                if (i == m_sortColumn)
+                    label += m_sortAscending ? L" ▲" : L" ▼";
+                LVCOLUMNW lc = {};
+                lc.mask = LVCF_TEXT;
+                lc.pszText = &label[0];
+                ListView_SetColumn(m_playlistLV, i, &lc);
+            }
+        }
+
+        SendMessageW(m_playlistLV, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(m_playlistLV, NULL, TRUE);
+    }
+
+    // ==========================================
+    // Playlist persistence
+    // ==========================================
+    void SavePlaylist() {
+        if (m_playlist.IsEmpty()) return;
+        std::wstring filePath = GetExeDirectory() + L"\\.playlist.txt";
+        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return;
+        DWORD written;
+        const WORD bom = 0xFEFF;
+        WriteFile(hFile, &bom, 2, &written, NULL);
+        for (int i = 0; i < m_playlist.GetCount(); i++) {
+            std::wstring line = m_playlist.GetFile(i) + L"\n";
+            WriteFile(hFile, line.c_str(),
+                (DWORD)(line.size() * sizeof(wchar_t)), &written, NULL);
+        }
+        CloseHandle(hFile);
+    }
+
+    void LoadPlaylist() {
+        std::wstring filePath = GetExeDirectory() + L"\\.playlist.txt";
+        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
+            FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return;
+
+        DWORD size = GetFileSize(hFile, NULL);
+        if (size > 2) {
+            DWORD read = 0;
+            std::wstring buf(size / 2 + 1, L'\0');
+            ReadFile(hFile, &buf[0], size, &read, NULL);
+            buf[read / 2] = L'\0';
+            const wchar_t* p = buf.c_str();
+            if (*p == 0xFEFF) p++;
+
+            m_playlist.Clear();
+            while (*p) {
+                const wchar_t* nl = wcschr(p, L'\n');
+                size_t lineLen = nl ? (size_t)(nl - p) : wcslen(p);
+                if (lineLen > 0 && p[lineLen-1] == L'\r') --lineLen;
+                if (lineLen > 0) {
+                    std::wstring line(p, lineLen);
+                    if (GetFileAttributesW(line.c_str()) != INVALID_FILE_ATTRIBUTES)
+                        m_playlist.AddFile(line);
+                }
+                p = nl ? nl + 1 : p + lineLen;
+            }
+        }
+        CloseHandle(hFile);
+        RefreshPlaylistUI();
+        if (!m_playlist.IsEmpty())
+            SetWindowTextW(m_staticSong,
+                (L"已加载 " + std::to_wstring(m_playlist.GetCount()) + L" 首歌曲").c_str());
+    }
+
+    // ==========================================
+    // Last folder persistence
+    // ==========================================
+    void SaveLastFolder(const std::wstring& folderPath) {
+        std::wstring filePath = GetExeDirectory() + L"\\.lastfolder.txt";
+        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return;
+        DWORD written;
+        const WORD bom = 0xFEFF;
+        WriteFile(hFile, &bom, 2, &written, NULL);
+        std::wstring data = folderPath + L"\n";
+        WriteFile(hFile, data.c_str(), (DWORD)(data.size() * sizeof(wchar_t)), &written, NULL);
+        CloseHandle(hFile);
+    }
+
+    bool LoadFromLastFolder() {
+        std::wstring filePath = GetExeDirectory() + L"\\.lastfolder.txt";
+        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
+            FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return false;
+
+        DWORD size = GetFileSize(hFile, NULL);
+        bool loaded = false;
+        if (size > 2) {
+            DWORD read = 0;
+            std::wstring buf(size / 2 + 1, L'\0');
+            ReadFile(hFile, &buf[0], size, &read, NULL);
+            buf[read / 2] = L'\0';
+            const wchar_t* p = buf.c_str();
+            if (*p == 0xFEFF) p++;
+            size_t len = wcslen(p);
+            while (len > 0 && (p[len-1] == L'\n' || p[len-1] == L'\r')) --len;
+
+            if (len > 0) {
+                std::wstring folder(p, len);
+                if (GetFileAttributesW(folder.c_str()) != INVALID_FILE_ATTRIBUTES &&
+                    (GetFileAttributesW(folder.c_str()) & FILE_ATTRIBUTE_DIRECTORY)) {
+                    m_playlist.ScanFolder(folder);
+                    RefreshPlaylistUI();
+                    if (!m_playlist.IsEmpty()) {
+                        SetWindowTextW(m_staticSong,
+                            (L"已加载 " + std::to_wstring(m_playlist.GetCount()) + L" 首歌曲").c_str());
+                        loaded = true;
+                    }
+                }
+            }
+        }
+        CloseHandle(hFile);
+        return loaded;
+    }
+
+    // ==========================================
+    // Volume persistence
+    // ==========================================
+    void SaveVolume() {
+        std::wstring filePath = GetExeDirectory() + L"\\.volume.txt";
+        int vol = (int)SendMessageW(m_sliderVol, TBM_GETPOS, 0, 0);
+        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return;
+        DWORD written;
+        wchar_t buf[16];
+        swprintf(buf, 16, L"%d\n", vol);
+        WriteFile(hFile, buf, (DWORD)(wcslen(buf) * sizeof(wchar_t)), &written, NULL);
+        CloseHandle(hFile);
+    }
+
+    void LoadVolume() {
+        std::wstring filePath = GetExeDirectory() + L"\\.volume.txt";
+        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
+            FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return;
+        DWORD size = GetFileSize(hFile, NULL);
+        if (size > 0 && size < 64) {
+            DWORD read = 0;
+            char buf[64] = {};
+            ReadFile(hFile, buf, size, &read, NULL);
+            int vol = atoi(buf);
+            if (vol >= 0 && vol <= 100) {
+                m_audio.SetVolume(vol);
+                SendMessageW(m_sliderVol, TBM_SETPOS, TRUE, vol);
+                UpdateVolLabel();
+            }
+        }
+        CloseHandle(hFile);
+    }
+};
+
+// ============================================
+// WinMain
+// ============================================
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    InitCommonControls();
+
+    MainWindow win;
+    if (!win.Create(hInst, nCmdShow)) {
+        CoUninitialize();
+        return 1;
+    }
+
+    MSG msg;
+    while (GetMessageW(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    CoUninitialize();
+    return (int)msg.wParam;
+}

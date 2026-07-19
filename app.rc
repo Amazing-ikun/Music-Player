@@ -1,0 +1,4 @@
+#include "Resource.h"
+
+// App icon (32x32, 32-bit)
+IDI_APP_ICON ICON "icon.ico"

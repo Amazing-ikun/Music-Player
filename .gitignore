@@ -1,0 +1,22 @@
+# Build output
+cmake-build-*/
+build/
+*.exe
+*.dll
+*.lib
+*.obj
+*.o
+
+# IDE
+.idea/
+*.user
+*.sln
+*.suo
+
+# Runtime data
+.playlist.txt
+.lastfolder.txt
+.volume.txt
+
+# BASS SDK (download separately)
+bass/

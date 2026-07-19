@@ -141,8 +141,12 @@ static bool CodeToBinding(const std::wstring& code, int& vk, int& mod) {
     return vk != 0;
 }
 
-// Forward declaration for the hotkey dialog
+// Forward declaration
 class MainWindow;
+
+// DlgCtx - Hotkey dialog context (needed by both MainWindow and HotkeyDlgProc)
+struct HKDlgCtx { HotkeyBinding* bindings; int recording; int count; MainWindow* win; int result; };
+
 static LRESULT CALLBACK HotkeyDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
 
 // ==========================================
@@ -1078,9 +1082,8 @@ private:
             x, y, dlgW, dlgH, m_hwnd, NULL, m_hInst, NULL);
         if (!hDlg) return;
 
-        // Store pointer to tmp + recording index in dialog's GWLP_USERDATA
-        struct DlgCtx { HotkeyBinding* bindings; int recording; int count; MainWindow* win; };
-        DlgCtx* ctx = new DlgCtx{ tmp, -1, m_hotkeyCount, this };
+        // Store context in dialog's GWLP_USERDATA
+        HKDlgCtx* ctx = new HKDlgCtx{ tmp, -1, m_hotkeyCount, this, 0 };
         SetWindowLongPtrW(hDlg, GWLP_USERDATA, (LONG_PTR)ctx);
 
         HFONT hGuiFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
@@ -1091,10 +1094,8 @@ private:
         for (int i = 0; i < m_hotkeyCount; i++) {
             wchar_t label[64];
             swprintf(label, 64, L"%ls:", m_hotkeys[i].actionName);
-
             CreateWindowExW(0, L"STATIC", label,
-                WS_CHILD | WS_VISIBLE,
-                20, rowY, 140, 24, hDlg, NULL, m_hInst, NULL);
+                WS_CHILD | WS_VISIBLE, 20, rowY, 140, 24, hDlg, NULL, m_hInst, NULL);
 
             std::wstring keyText = HotkeyToString(tmp[i].vk, tmp[i].mod);
             HWND hKey = CreateWindowExW(0, L"STATIC", keyText.c_str(),
@@ -1105,7 +1106,6 @@ private:
             CreateWindowExW(0, L"BUTTON", L"更改",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 380, rowY, 60, 24, hDlg, (HMENU)(size_t)(200 + i), m_hInst, NULL);
-
             rowY += 32;
         }
 
@@ -1123,17 +1123,16 @@ private:
         EnableWindow(m_hwnd, FALSE);
         MSG msg;
         while (IsWindow(hDlg) && GetMessageW(&msg, NULL, 0, 0)) {
+            // WM_KEYDOWN from the thread queue — capture for recording
             if (msg.message == WM_KEYDOWN) {
-                DlgCtx* c = (DlgCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
+                HKDlgCtx* c = (HKDlgCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
                 if (c && c->recording >= 0 && c->recording < c->count) {
                     int mod = 0;
                     if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mod |= MOD_CONTROL;
                     if (GetAsyncKeyState(VK_MENU) & 0x8000)    mod |= MOD_ALT;
                     int vk = (int)msg.wParam;
-
                     if (vk == VK_CONTROL || vk == VK_MENU || vk == VK_SHIFT ||
                         vk == VK_ESCAPE || vk == VK_RETURN) continue;
-
                     if (mod == 0) mod = MOD_CONTROL;
                     int idx = c->recording;
                     c->bindings[idx].vk = vk;
@@ -1141,43 +1140,21 @@ private:
                     std::wstring ks = HotkeyToString(vk, mod);
                     SetWindowTextW(GetDlgItem(hDlg, 100 + idx), ks.c_str());
                     c->recording = -1;
-                }
-                // Still dispatch WM_KEYDOWN to the focused control
-            }
-
-            if (msg.message == WM_COMMAND && HIWORD(msg.wParam) == BN_CLICKED) {
-                int ctrlId = LOWORD(msg.wParam);
-                DlgCtx* c = (DlgCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
-                if (c && ctrlId >= 200 && ctrlId < 200 + c->count) {
-                    int idx = ctrlId - 200;
-                    c->recording = idx;
-                    SetWindowTextW(GetDlgItem(hDlg, 100 + idx), L"[按下新按键...]");
-                    continue;
-                }
-                if (ctrlId == IDOK && c) {
-                    memcpy(m_hotkeys, c->bindings, sizeof(m_hotkeys));
-                    UnregisterHotKeys();
-                    RegisterHotKeys();
-                    SaveHotkeyBindings();
-                    DestroyWindow(hDlg);
-                    continue;
-                }
-                if (ctrlId == IDCANCEL || ctrlId == 2) {
-                    DestroyWindow(hDlg);
-                    continue;
+                    continue; // Don't dispatch to focused control
                 }
             }
-
-            if (msg.message == WM_SYSKEYDOWN && (msg.wParam == VK_F4)) {
-                DestroyWindow(hDlg);
-                continue;
-            }
-
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
         EnableWindow(m_hwnd, TRUE);
         SetForegroundWindow(m_hwnd);
+
+        if (ctx->result == 1) {
+            memcpy(m_hotkeys, ctx->bindings, sizeof(m_hotkeys));
+            UnregisterHotKeys();
+            RegisterHotKeys();
+            SaveHotkeyBindings();
+        }
 
         delete ctx;
         DeleteObject(hGuiFont);
@@ -1777,6 +1754,27 @@ private:
 // ==========================================
 static LRESULT CALLBACK HotkeyDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_CLOSE) { DestroyWindow(hDlg); return 0; }
+    if (msg == WM_COMMAND) {
+        int ctrlId = LOWORD(wp);
+        HKDlgCtx* c = (HKDlgCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
+        if (!c) return DefWindowProcW(hDlg, msg, wp, lp);
+
+        if (ctrlId >= 200 && ctrlId < 200 + c->count) {
+            int idx = ctrlId - 200;
+            c->recording = idx;
+            SetWindowTextW(GetDlgItem(hDlg, 100 + idx), L"[按下新按键...]");
+            return 0;
+        }
+        if (ctrlId == 1 || ctrlId == IDOK) {
+            c->result = 1;
+            DestroyWindow(hDlg);
+            return 0;
+        }
+        if (ctrlId == 2 || ctrlId == IDCANCEL) {
+            DestroyWindow(hDlg);
+            return 0;
+        }
+    }
     return DefWindowProcW(hDlg, msg, wp, lp);
 }
 

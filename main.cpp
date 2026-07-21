@@ -346,6 +346,7 @@ private:
 
         LoadSettings();
         UpdateSettingsMenu();
+        UpdateModeUI();
 
         if (!LoadPlaylist()) {
             LoadFromLastFolder();
@@ -1778,11 +1779,12 @@ private:
             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile == INVALID_HANDLE_VALUE) return;
         DWORD written;
-        char buf[128];
-        int len = sprintf(buf, "autoplay=%d\nremember_progress=%d\ntray_minimize=%d\n",
+        char buf[160];
+        int len = sprintf(buf, "autoplay=%d\nremember_progress=%d\ntray_minimize=%d\nplay_mode=%d\n",
                           m_settingsAutoplay ? 1 : 0,
                           m_settingsRememberProgress ? 1 : 0,
-                          m_settingsTray ? 1 : 0);
+                          m_settingsTray ? 1 : 0,
+                          (int)m_audio.GetPlayMode());
         WriteFile(hFile, buf, (DWORD)len, &written, NULL);
         CloseHandle(hFile);
     }
@@ -1797,6 +1799,7 @@ private:
         if (hFile == INVALID_HANDLE_VALUE) return;
 
         DWORD size = GetFileSize(hFile, NULL);
+        int mode = 0;
         if (size > 0 && size < 2048) {
             char buf[2048] = {};
             DWORD read;
@@ -1810,6 +1813,11 @@ private:
                     if (sscanf(p, "autoplay=%d", &m_settingsAutoplay) == 1) {}
                     else if (sscanf(p, "remember_progress=%d", &m_settingsRememberProgress) == 1) {}
                     else if (sscanf(p, "tray_minimize=%d", &m_settingsTray) == 1) {}
+                    else if (sscanf(p, "play_mode=%d", &mode) == 1) {
+                        if (mode >= 0 && mode <= 2) {
+                            m_audio.SetPlayMode(static_cast<PlayMode>(mode));
+                        }
+                    }
                 }
                 p = nl + 1;
             }

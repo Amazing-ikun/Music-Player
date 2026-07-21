@@ -333,6 +333,8 @@ private:
         CreateMenuBar();
         CreateControls();
 
+        RegisterStatsWindowClass();
+
         if (!m_audio.Initialize(m_hwnd)) {
             MessageBoxW(m_hwnd,
                 L"无法初始化音频引擎 (bass.dll)。\n\n"
@@ -1213,7 +1215,7 @@ private:
             swprintf(buf, bufLen, L"%d秒", s);
     }
 
-    void ShowStatsWindow() {
+    void RegisterStatsWindowClass() {
         const wchar_t STATS_CLASS[] = L"StatsWindow";
         WNDCLASSEXW wc = {};
         wc.cbSize        = sizeof(wc);
@@ -1224,8 +1226,11 @@ private:
         wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
         wc.lpszClassName = STATS_CLASS;
-        if (!RegisterClassExW(&wc)) return;
+        RegisterClassExW(&wc);
+    }
 
+    void ShowStatsWindow() {
+        const wchar_t STATS_CLASS[] = L"StatsWindow";
         int dlgW = 620, dlgH = 520;
         int sw = GetSystemMetrics(SM_CXSCREEN);
         int sh = GetSystemMetrics(SM_CYSCREEN);

@@ -12,6 +12,7 @@ AudioEngine::AudioEngine()
     , m_playMode(PlayMode::Sequential)
     , m_notifyHwnd(NULL)
     , m_notifyMsg(0)
+    , m_error(AudioError::Success)
 {
 }
 
@@ -24,8 +25,10 @@ AudioEngine::~AudioEngine() {
 bool AudioEngine::Initialize(HWND hwnd) {
     // 使用默认音频设备，44.1kHz采样率
     if (!BASS_Init(-1, 44100, 0, hwnd, NULL)) {
+        m_error = MapBassError(BASS_ErrorGetCode());
         return false;
     }
+    m_error = AudioError::Success;
     // 设置全局音量，BASS_CONFIG_GVOL_STREAM 范围 0-10000
     BASS_SetConfig(BASS_CONFIG_GVOL_STREAM, m_volume * 100);
     return true;
@@ -56,8 +59,11 @@ bool AudioEngine::Load(const std::wstring& filePath) {
         BASS_STREAM_AUTOFREE | BASS_UNICODE);
 
     if (!m_stream) {
+        m_error = MapBassError(BASS_ErrorGetCode());
         return false;
     }
+
+    m_error = AudioError::Success;
 
     // 设置音量
     BASS_ChannelSetAttribute(m_stream, BASS_ATTRIB_VOL, m_volume / 100.0f);
@@ -235,4 +241,33 @@ void CALLBACK AudioEngine::EndSyncProc(HSYNC /*handle*/, DWORD /*channel*/,
     if (engine && engine->m_notifyHwnd) {
         PostMessage(engine->m_notifyHwnd, engine->m_notifyMsg, 0, 0);
     }
+}
+
+AudioError AudioEngine::MapBassError(int bassCode) {
+    switch (bassCode) {
+        case BASS_ERROR_FILEOPEN: return AudioError::FileNotFound;
+        case BASS_ERROR_FILEFORM: return AudioError::UnsupportedFormat;
+        case BASS_ERROR_CODEC:    return AudioError::MissingCodec;
+        case BASS_ERROR_FORMAT:   return AudioError::UnsupportedParam;
+        case BASS_ERROR_NOTAUDIO: return AudioError::UnsupportedFormat;
+        case BASS_ERROR_DECODE:   return AudioError::DecodeFailed;
+        case BASS_ERROR_INIT:     return AudioError::InitFailed;
+        case BASS_ERROR_MEM:      return AudioError::Unknown;
+        case BASS_ERROR_ILLPARAM: return AudioError::UnsupportedParam;
+        default:                  return AudioError::Unknown;
+    }
+}
+
+std::wstring AudioEngine::GetErrorMessage() const {
+    switch (m_error) {
+        case AudioError::Success:           return L"";
+        case AudioError::FileNotFound:      return L"文件不存在或无法访问";
+        case AudioError::UnsupportedFormat: return L"不支持此音频格式";
+        case AudioError::MissingCodec:      return L"缺少所需的解码器";
+        case AudioError::UnsupportedParam:  return L"不支持的音频格式参数";
+        case AudioError::DecodeFailed:      return L"解码失败";
+        case AudioError::InitFailed:        return L"音频引擎未初始化";
+        case AudioError::Unknown:           return L"未知错误";
+    }
+    return L"未知错误";
 }

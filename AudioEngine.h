@@ -18,6 +18,19 @@ enum class PlayMode {
 // 职责: BASS初始化/清理、音频流加载/播放控制、
 //       音量控制、进度控制、播放模式、元数据读取
 // ============================================
+
+// 错误码
+enum class AudioError {
+    Success = 0,
+    FileNotFound,       // 文件不存在或无法访问
+    UnsupportedFormat,  // 不支持此音频格式
+    MissingCodec,       // 缺少所需的解码器
+    UnsupportedParam,   // 不支持的音频格式参数
+    DecodeFailed,       // 解码失败
+    InitFailed,         // 音频引擎未初始化
+    Unknown             // 未知错误
+};
+
 class AudioEngine {
 public:
     AudioEngine();
@@ -65,9 +78,16 @@ public:
         m_notifyMsg = msg;
     }
 
+    // 错误码接口
+    AudioError GetError() const { return m_error; }
+    std::wstring GetErrorMessage() const;
+
 private:
     // BASS 同步回调：歌曲播放结束
     static void CALLBACK EndSyncProc(HSYNC handle, DWORD channel, DWORD data, void* user);
+
+    // 将BASS错误码映射为内部错误码
+    static AudioError MapBassError(int bassCode);
 
     HSTREAM m_stream;       // BASS 音频流句柄
     HSYNC   m_endSync;      // 结束同步器句柄
@@ -77,4 +97,5 @@ private:
     PlayMode m_playMode;    // 当前播放模式
     HWND    m_notifyHwnd;   // 通知窗口
     UINT    m_notifyMsg;    // 通知消息
+    AudioError m_error;     // 最后一次操作的错误码
 };

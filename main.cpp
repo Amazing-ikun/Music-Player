@@ -366,6 +366,7 @@ private:
         }
 
         RegisterHotKeys();
+        AddTrayIcon();
         UpdateUI();
     }
 
@@ -610,7 +611,6 @@ private:
                 case ID_SETTINGS_TRAY:
                     m_settingsTray = !m_settingsTray;
                     UpdateSettingsMenu();
-                    if (!m_settingsTray) RemoveTrayIcon();
                     break;
                 case ID_SETTINGS_HOTKEYS:
                     ShowHotkeyDialog();
@@ -624,13 +624,14 @@ private:
                     SetPlayMode(PlayMode::Shuffle);
                     Reshuffle();
                     break;
+                case ID_TRAY_PLAYPAUSE: OnPlayPause(); break;
+                case ID_TRAY_PREV:      OnPrev();      break;
+                case ID_TRAY_NEXT:      OnNext();      break;
                 case ID_TRAY_RESTORE:
                     ShowWindow(m_hwnd, SW_RESTORE);
                     SetForegroundWindow(m_hwnd);
-                    RemoveTrayIcon();
                     break;
                 case ID_TRAY_EXIT:
-                    m_settingsTray = false;
                     OnRealClose();
                     break;
             }
@@ -1181,7 +1182,7 @@ private:
             case HKID_NEXT:      OnNext();        break;
             case HKID_VOLUP:     AdjustVolume(5);   break;
             case HKID_VOLDN:     AdjustVolume(-5);  break;
-            case HKID_RESTORE:   ShowWindow(m_hwnd, SW_RESTORE); SetForegroundWindow(m_hwnd); RemoveTrayIcon(); break;
+            case HKID_RESTORE:   ShowWindow(m_hwnd, SW_RESTORE); SetForegroundWindow(m_hwnd); break;
             case HKID_MINIMIZE:  MinimizeToTray(); break;
         }
     }
@@ -1887,7 +1888,6 @@ private:
     }
 
     void MinimizeToTray() {
-        AddTrayIcon();
         ShowWindow(m_hwnd, SW_HIDE);
     }
 
@@ -1895,10 +1895,15 @@ private:
         if (LOWORD(lp) == WM_LBUTTONDBLCLK) {
             ShowWindow(m_hwnd, SW_RESTORE);
             SetForegroundWindow(m_hwnd);
-            RemoveTrayIcon();
         } else if (LOWORD(lp) == WM_RBUTTONDOWN) {
             HMENU popup = CreatePopupMenu();
-            AppendMenuW(popup, MF_STRING, ID_TRAY_RESTORE, L"恢复");
+            AppendMenuW(popup, MF_STRING, ID_TRAY_PREV, L"上一首");
+            AppendMenuW(popup, MF_STRING, ID_TRAY_NEXT, L"下一首");
+            AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
+            AppendMenuW(popup, MF_STRING, ID_TRAY_PLAYPAUSE,
+                m_audio.IsPlaying() ? L"暂停" : L"播放");
+            AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
+            AppendMenuW(popup, MF_STRING, ID_TRAY_RESTORE, L"显示窗口");
             AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
             AppendMenuW(popup, MF_STRING, ID_TRAY_EXIT, L"退出");
             POINT pt;

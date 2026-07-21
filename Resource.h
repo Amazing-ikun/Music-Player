@@ -29,6 +29,9 @@
 #define ID_SETTINGS_HOTKEYS   2012
 #define ID_SETTINGS_STATS    2013
 #define ID_FILE_EXPORT_PLAYLIST 2014
+#define ID_TRAY_PLAYPAUSE    2015
+#define ID_TRAY_PREV         2016
+#define ID_TRAY_NEXT         2017
 
 // Custom Window Messages
 #define WM_USER_SONG_END    (WM_USER + 100)

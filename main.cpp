@@ -394,6 +394,7 @@ private:
         HMENU fileMenu = CreatePopupMenu();
         AppendMenuW(fileMenu, MF_STRING, ID_FILE_OPENFOLDER, L"打开文件夹(&O)...");
         AppendMenuW(fileMenu, MF_STRING, ID_FILE_ADDFILES, L"添加歌曲(&A)...");
+        AppendMenuW(fileMenu, MF_STRING, ID_FILE_EXPORT_PLAYLIST, L"导出歌单(&E)...");
         AppendMenuW(fileMenu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(fileMenu, MF_STRING, ID_FILE_EXIT, L"退出(&X)");
         AppendMenuW(bar, MF_POPUP, (UINT_PTR)fileMenu, L"文件(&F)");
@@ -589,9 +590,10 @@ private:
 
         if (hCtrl == NULL) {
             switch (id) {
-                case ID_FILE_OPENFOLDER: OpenFolder(); break;
-                case ID_FILE_ADDFILES:   AddFiles();   break;
-                case ID_FILE_EXIT:       OnRealClose(); break;
+                case ID_FILE_OPENFOLDER:      OpenFolder(); break;
+                case ID_FILE_ADDFILES:        AddFiles();   break;
+                case ID_FILE_EXPORT_PLAYLIST: ExportPlaylist(); break;
+                case ID_FILE_EXIT:            OnRealClose(); break;
                 case ID_SETTINGS_AUTOPLAY:
                     m_settingsAutoplay = !m_settingsAutoplay;
                     UpdateSettingsMenu();
@@ -882,6 +884,90 @@ private:
                 UpdateUI();
             }
         }
+    }
+
+    // Export playlist to JSON file
+    void ExportPlaylist() {
+        if (m_playlist.IsEmpty()) {
+            MessageBoxW(m_hwnd, L"播放列表为空，没有可导出的内容。", L"导出歌单", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+
+        wchar_t filePath[MAX_PATH] = {};
+        OPENFILENAMEW ofn = {};
+        ofn.lStructSize  = sizeof(ofn);
+        ofn.hwndOwner    = m_hwnd;
+        ofn.lpstrFile    = filePath;
+        ofn.nMaxFile     = MAX_PATH;
+        ofn.lpstrFilter  = L"JSON 文件 (*.json)\0*.json\0所有文件 (*.*)\0*.*\0";
+        ofn.nFilterIndex = 1;
+        ofn.lpstrDefExt  = L"json";
+        ofn.Flags        = OFN_OVERWRITEPROMPT | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
+
+        if (!GetSaveFileNameW(&ofn)) return;
+
+        // Build JSON
+        std::string json = "{\n";
+        json += "  \"playlist\": [\n";
+        for (int i = 0; i < m_playlist.GetCount(); i++) {
+            const auto& song = m_playlist.GetSong(i);
+            char fileBuf[1024], titleBuf[512], artistBuf[256], albumBuf[256];
+            snprintf(fileBuf,  sizeof(fileBuf),  "%ls", song.filePath.c_str());
+            snprintf(titleBuf, sizeof(titleBuf), "%ls", song.title.c_str());
+            snprintf(artistBuf, sizeof(artistBuf), "%ls", song.artist.c_str());
+            snprintf(albumBuf, sizeof(albumBuf),  "%ls", song.album.c_str());
+
+            json += "    {\n";
+            json += "      \"filePath\": \"" + EscapeJson(fileBuf) + "\",\n";
+            json += "      \"title\": \""    + EscapeJson(titleBuf) + "\",\n";
+            json += "      \"artist\": \""   + EscapeJson(artistBuf) + "\",\n";
+            json += "      \"album\": \""    + EscapeJson(albumBuf) + "\",\n";
+            json += "      \"duration\": "   + std::to_string(song.duration) + "\n";
+            json += "    }";
+            if (i < m_playlist.GetCount() - 1) json += ",";
+            json += "\n";
+        }
+        json += "  ]\n";
+        json += "}\n";
+
+        HANDLE hFile = CreateFileW(filePath, GENERIC_WRITE, 0, NULL,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) {
+            MessageBoxW(m_hwnd, L"无法写入文件。", L"导出失败", MB_OK | MB_ICONERROR);
+            return;
+        }
+        DWORD written;
+        // Write UTF-8 BOM for compatibility
+        const BYTE bomUtf8[] = { 0xEF, 0xBB, 0xBF };
+        WriteFile(hFile, bomUtf8, 3, &written, NULL);
+        WriteFile(hFile, json.c_str(), (DWORD)json.size(), &written, NULL);
+        CloseHandle(hFile);
+
+        std::wstring msg = L"成功导出 " + std::to_wstring(m_playlist.GetCount()) + L" 首歌曲。";
+        MessageBoxW(m_hwnd, msg.c_str(), L"导出完成", MB_OK | MB_ICONINFORMATION);
+    }
+
+    static std::string EscapeJson(const std::string& s) {
+        std::string out;
+        out.reserve(s.size());
+        for (char c : s) {
+            switch (c) {
+                case '\"': out += "\\\""; break;
+                case '\\': out += "\\\\"; break;
+                case '\n': out += "\\n";  break;
+                case '\r': out += "\\r";  break;
+                case '\t': out += "\\t";  break;
+                default:
+                    if ((unsigned char)c < 0x20) {
+                        char buf[8];
+                        snprintf(buf, sizeof(buf), "\\u%04x", (unsigned char)c);
+                        out += buf;
+                    } else {
+                        out += c;
+                    }
+            }
+        }
+        return out;
     }
 
     // Playback controls

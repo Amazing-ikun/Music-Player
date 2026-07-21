@@ -1906,6 +1906,16 @@ private:
             AppendMenuW(popup, MF_STRING, ID_TRAY_PLAYPAUSE,
                 m_audio.IsPlaying() ? L"暂停" : L"播放");
             AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
+            HMENU modeSub = CreatePopupMenu();
+            PlayMode pm = m_audio.GetPlayMode();
+            AppendMenuW(modeSub, MF_STRING | (pm == PlayMode::Sequential ? MF_CHECKED : MF_UNCHECKED),
+                ID_PLAY_SEQUENTIAL, L"顺序播放");
+            AppendMenuW(modeSub, MF_STRING | (pm == PlayMode::RepeatOne ? MF_CHECKED : MF_UNCHECKED),
+                ID_PLAY_REPEATONE, L"单曲循环");
+            AppendMenuW(modeSub, MF_STRING | (pm == PlayMode::Shuffle ? MF_CHECKED : MF_UNCHECKED),
+                ID_PLAY_SHUFFLE, L"随机播放");
+            AppendMenuW(popup, MF_POPUP, (UINT_PTR)modeSub, L"播放模式");
+            AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
             AppendMenuW(popup, MF_STRING, ID_TRAY_RESTORE, L"显示窗口");
             AppendMenuW(popup, MF_STRING, ID_TRAY_MINIMIZE, L"最小化到托盘");
             AppendMenuW(popup, MF_SEPARATOR, 0, NULL);

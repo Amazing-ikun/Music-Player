@@ -410,16 +410,18 @@ private:
         AppendMenuW(m_settingsMenu, MF_STRING | MF_CHECKED, ID_SETTINGS_TRAY,
             L"最小化到托盘");
         AppendMenuW(m_settingsMenu, MF_SEPARATOR, 0, NULL);
-        AppendMenuW(m_settingsMenu, MF_STRING, ID_SETTINGS_HOTKEYS,
-            L"配置快捷键...");
-        AppendMenuW(m_settingsMenu, MF_STRING, ID_SETTINGS_STATS, L"统计");
-        AppendMenuW(bar, MF_POPUP, (UINT_PTR)m_settingsMenu, L"设置(&S)");
 
         m_playSubMenu = CreatePopupMenu();
         AppendMenuW(m_playSubMenu, MF_STRING | MF_CHECKED, ID_PLAY_SEQUENTIAL, L"顺序播放(&S)");
         AppendMenuW(m_playSubMenu, MF_STRING, ID_PLAY_REPEATONE, L"单曲循环(&R)");
         AppendMenuW(m_playSubMenu, MF_STRING, ID_PLAY_SHUFFLE, L"随机播放(&H)");
-        AppendMenuW(bar, MF_POPUP, (UINT_PTR)m_playSubMenu, L"播放(&P)");
+        AppendMenuW(m_settingsMenu, MF_POPUP, (UINT_PTR)m_playSubMenu, L"播放模式");
+
+        AppendMenuW(m_settingsMenu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(m_settingsMenu, MF_STRING, ID_SETTINGS_HOTKEYS,
+            L"配置快捷键...");
+        AppendMenuW(m_settingsMenu, MF_STRING, ID_SETTINGS_STATS, L"统计");
+        AppendMenuW(bar, MF_POPUP, (UINT_PTR)m_settingsMenu, L"设置(&S)");
 
         SetMenu(m_hwnd, bar);
     }

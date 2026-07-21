@@ -178,7 +178,7 @@ public:
         , m_settingsAutoplay(true), m_settingsRememberProgress(true)
         , m_settingsTray(true), m_trayIconAdded(false)
         , m_ctrlPanel(NULL)
-        , m_listening(false)
+        , m_listening(false), m_saveTick(0)
     {
         srand((unsigned)time(NULL));
         InitDefaultHotkeys();
@@ -264,6 +264,7 @@ private:
     ListeningHistory m_history;
     bool m_listening;
     std::chrono::steady_clock::time_point m_listenStart;
+    int m_saveTick;
 
     HFONT m_hFont;
 
@@ -378,6 +379,7 @@ private:
     void OnRealClose() {
         StopListening();
         m_history.Save(GetExeDirectory() + L"\\.history.txt");
+        if (m_settingsRememberProgress) SaveLastSong();
         SavePlaylist();
         SaveVolume();
         SaveSettings();
@@ -662,7 +664,10 @@ private:
                     m_audio.SetPosition(len * pos / SEEK_RES);
                     UpdateTimeDisplay();
                 }
-                if (code == TB_ENDTRACK) m_userDraggingSeek = false;
+                if (code == TB_ENDTRACK) {
+                    m_userDraggingSeek = false;
+                    if (m_settingsRememberProgress) SaveLastSong();
+                }
             }
         } else if (hCtrl == m_sliderVol) {
             int vol = (int)SendMessageW(m_sliderVol, TBM_GETPOS, 0, 0);
@@ -740,6 +745,12 @@ private:
         if (m_audio.IsLoaded() && !m_userDraggingSeek) {
             UpdateSeekDisplay();
             UpdateTimeDisplay();
+            if (m_settingsRememberProgress) {
+                if (++m_saveTick >= 20) {
+                    m_saveTick = 0;
+                    SaveLastSong();
+                }
+            }
         }
     }
 
@@ -1577,12 +1588,9 @@ private:
             SetWindowTextW(m_staticSong, (L"正在播放: " + GetDisplayName(path)).c_str());
 
         SetTimer(m_hwnd, TIMER_ID_SEEK, 500, NULL);
+        m_saveTick = 0;
 
         UpdateTrayTip();
-
-        if (m_settingsRememberProgress) {
-            SaveLastSong();
-        }
     }
 
     

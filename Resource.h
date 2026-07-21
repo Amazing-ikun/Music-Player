@@ -32,6 +32,7 @@
 #define ID_TRAY_PLAYPAUSE    2015
 #define ID_TRAY_PREV         2016
 #define ID_TRAY_NEXT         2017
+#define ID_TRAY_MINIMIZE     2018
 
 // Custom Window Messages
 #define WM_USER_SONG_END    (WM_USER + 100)

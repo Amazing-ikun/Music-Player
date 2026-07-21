@@ -631,6 +631,9 @@ private:
                     ShowWindow(m_hwnd, SW_RESTORE);
                     SetForegroundWindow(m_hwnd);
                     break;
+                case ID_TRAY_MINIMIZE:
+                    MinimizeToTray();
+                    break;
                 case ID_TRAY_EXIT:
                     OnRealClose();
                     break;
@@ -1904,6 +1907,7 @@ private:
                 m_audio.IsPlaying() ? L"暂停" : L"播放");
             AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
             AppendMenuW(popup, MF_STRING, ID_TRAY_RESTORE, L"显示窗口");
+            AppendMenuW(popup, MF_STRING, ID_TRAY_MINIMIZE, L"最小化到托盘");
             AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
             AppendMenuW(popup, MF_STRING, ID_TRAY_EXIT, L"退出");
             POINT pt;

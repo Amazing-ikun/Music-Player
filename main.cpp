@@ -1508,7 +1508,7 @@ private:
 
         yPos += 78;
 
-        CreateWindowExW(0, L"STATIC", L"热门歌曲（播放次数）",
+        CreateWindowExW(0, L"STATIC", L"我常听的",
             WS_CHILD | WS_VISIBLE, 15, yPos, 180, 20, hDlg, NULL, m_hInst, NULL);
 
         yPos += 20;

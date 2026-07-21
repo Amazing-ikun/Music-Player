@@ -33,6 +33,14 @@
 #define ID_TRAY_PREV         2016
 #define ID_TRAY_NEXT         2017
 #define ID_TRAY_MINIMIZE     2018
+#define ID_SPEED_025         2019
+#define ID_SPEED_050         2020
+#define ID_SPEED_075         2021
+#define ID_SPEED_100         2022
+#define ID_SPEED_125         2023
+#define ID_SPEED_150         2024
+#define ID_SPEED_200         2025
+#define ID_SPEED_CUSTOM      2026
 
 // Custom Window Messages
 #define WM_USER_SONG_END    (WM_USER + 100)

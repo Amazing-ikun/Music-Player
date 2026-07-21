@@ -190,6 +190,7 @@ struct StatsDlgCtx {
     HWND hDlg;
 };
 static LRESULT CALLBACK StatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
+static LRESULT CALLBACK SpeedInputDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
 
 // MainWindow
 class MainWindow {
@@ -287,6 +288,7 @@ private:
     // ---- Menu handles (for nested submenus) ----
     HMENU m_settingsMenu;
     HMENU m_playSubMenu;
+    HMENU m_speedSubMenu;
 
     // ---- Listening history ----
     ListeningHistory m_history;
@@ -382,6 +384,7 @@ private:
         LoadSettings();
         UpdateSettingsMenu();
         UpdateModeUI();
+        UpdateSpeedMenu();
 
         if (!LoadPlaylist()) {
             WriteLog(L"播放列表文件不存在或为空，尝试加载上次打开的文件夹");
@@ -454,6 +457,19 @@ private:
         AppendMenuW(m_playSubMenu, MF_STRING, ID_PLAY_REPEATONE, L"单曲循环(&R)");
         AppendMenuW(m_playSubMenu, MF_STRING, ID_PLAY_SHUFFLE, L"随机播放(&H)");
         AppendMenuW(m_settingsMenu, MF_POPUP, (UINT_PTR)m_playSubMenu, L"播放模式");
+
+        // 倍速 submenu inside 设置
+        m_speedSubMenu = CreatePopupMenu();
+        AppendMenuW(m_speedSubMenu, MF_STRING, ID_SPEED_025, L"0.25x");
+        AppendMenuW(m_speedSubMenu, MF_STRING, ID_SPEED_050, L"0.5x");
+        AppendMenuW(m_speedSubMenu, MF_STRING, ID_SPEED_075, L"0.75x");
+        AppendMenuW(m_speedSubMenu, MF_STRING | MF_CHECKED, ID_SPEED_100, L"1x");
+        AppendMenuW(m_speedSubMenu, MF_STRING, ID_SPEED_125, L"1.25x");
+        AppendMenuW(m_speedSubMenu, MF_STRING, ID_SPEED_150, L"1.5x");
+        AppendMenuW(m_speedSubMenu, MF_STRING, ID_SPEED_200, L"2x");
+        AppendMenuW(m_speedSubMenu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(m_speedSubMenu, MF_STRING, ID_SPEED_CUSTOM, L"自定义...");
+        AppendMenuW(m_settingsMenu, MF_POPUP, (UINT_PTR)m_speedSubMenu, L"倍速");
 
         AppendMenuW(m_settingsMenu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(m_settingsMenu, MF_STRING, ID_SETTINGS_HOTKEYS,
@@ -660,6 +676,16 @@ private:
                 case ID_PLAY_SHUFFLE:
                     SetPlayMode(PlayMode::Shuffle);
                     Reshuffle();
+                    break;
+                case ID_SPEED_025: ApplySpeed(0.25); break;
+                case ID_SPEED_050: ApplySpeed(0.5);  break;
+                case ID_SPEED_075: ApplySpeed(0.75); break;
+                case ID_SPEED_100: ApplySpeed(1.0);  break;
+                case ID_SPEED_125: ApplySpeed(1.25); break;
+                case ID_SPEED_150: ApplySpeed(1.5);  break;
+                case ID_SPEED_200: ApplySpeed(2.0);  break;
+                case ID_SPEED_CUSTOM:
+                    ShowSpeedInputDialog();
                     break;
                 case ID_TRAY_PLAYPAUSE: OnPlayPause(); break;
                 case ID_TRAY_PREV:      OnPrev();      break;
@@ -1075,13 +1101,19 @@ private:
             if (m_currentIndex >= 0 && m_currentIndex < m_playlist.GetCount()) {
                 std::wstring meta = m_audio.GetFormattedMetadata();
                 const auto& path = m_playlist.GetFile(m_currentIndex);
-                if (!meta.empty()) {
-                    SetWindowTextW(m_staticSong, (L"正在播放: " + meta).c_str());
-                    UpdateTrayTip();
-                } else {
-                    SetWindowTextW(m_staticSong, (L"正在播放: " + GetDisplayName(path)).c_str());
-                    UpdateTrayTip();
+                std::wstring text;
+                if (!meta.empty())
+                    text = L"正在播放: " + meta;
+                else
+                    text = L"正在播放: " + GetDisplayName(path);
+                double speed = m_audio.GetSpeed();
+                if (speed != 1.0) {
+                    wchar_t sb[16];
+                    swprintf(sb, 16, L" (%.2gx)", speed);
+                    text += sb;
                 }
+                SetWindowTextW(m_staticSong, text.c_str());
+                UpdateTrayTip();
             }
             SetTimer(m_hwnd, TIMER_ID_SEEK, 500, NULL);
         }
@@ -1136,6 +1168,46 @@ private:
             MF_BYCOMMAND | (pm == PlayMode::Shuffle ? MF_CHECKED : MF_UNCHECKED));
     }
 
+    void UpdateSpeedMenu() {
+        double s = m_audio.GetSpeed();
+        int checkId = ID_SPEED_CUSTOM;
+        if (s == 0.25) checkId = ID_SPEED_025;
+        else if (s == 0.5)  checkId = ID_SPEED_050;
+        else if (s == 0.75) checkId = ID_SPEED_075;
+        else if (s == 1.0)  checkId = ID_SPEED_100;
+        else if (s == 1.25) checkId = ID_SPEED_125;
+        else if (s == 1.5)  checkId = ID_SPEED_150;
+        else if (s == 2.0)  checkId = ID_SPEED_200;
+
+        int ids[] = { ID_SPEED_025, ID_SPEED_050, ID_SPEED_075, ID_SPEED_100,
+                      ID_SPEED_125, ID_SPEED_150, ID_SPEED_200 };
+        for (int id : ids)
+            CheckMenuItem(m_speedSubMenu, id, MF_BYCOMMAND | MF_UNCHECKED);
+        CheckMenuItem(m_speedSubMenu, checkId, MF_BYCOMMAND | MF_CHECKED);
+    }
+
+    void ApplySpeed(double speed) {
+        m_audio.SetSpeed(speed);
+        UpdateSpeedMenu();
+        // Update status bar if currently playing
+        if (m_currentIndex >= 0 && m_currentIndex < m_playlist.GetCount()) {
+            const std::wstring& path = m_playlist.GetFile(m_currentIndex);
+            std::wstring meta = m_audio.GetFormattedMetadata();
+            std::wstring text;
+            if (!meta.empty())
+                text = L"正在播放: " + meta;
+            else
+                text = L"正在播放: " + GetDisplayName(path);
+            if (speed != 1.0) {
+                wchar_t speedBuf[16];
+                swprintf(speedBuf, 16, L" (%.2gx)", speed);
+                text += speedBuf;
+            }
+            SetWindowTextW(m_staticSong, text.c_str());
+        }
+        SaveSettings();
+    }
+
     void UpdateSettingsMenu() {
         CheckMenuItem(m_settingsMenu, ID_SETTINGS_AUTOPLAY,
             MF_BYCOMMAND | (m_settingsAutoplay ? MF_CHECKED : MF_UNCHECKED));
@@ -1145,7 +1217,69 @@ private:
             MF_BYCOMMAND | (m_settingsTray ? MF_CHECKED : MF_UNCHECKED));
     }
 
-    
+
+    // Speed input dialog
+
+    void ShowSpeedInputDialog() {
+        const wchar_t DLG_CLASS[] = L"SpeedInputDlg";
+        WNDCLASSEXW wc = {};
+        wc.cbSize        = sizeof(wc);
+        wc.style         = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc   = SpeedInputDlgProc;
+        wc.hInstance     = m_hInst;
+        wc.hIcon         = LoadIcon(NULL, IDI_APPLICATION);
+        wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = DLG_CLASS;
+        if (!RegisterClassExW(&wc)) return;
+
+        int dlgW = 280, dlgH = 140;
+        int sw = GetSystemMetrics(SM_CXSCREEN);
+        int sh = GetSystemMetrics(SM_CYSCREEN);
+        int x = (sw - dlgW) / 2, y = (sh - dlgH) / 2;
+
+        HWND hDlg = CreateWindowExW(0, DLG_CLASS, L"自定义倍速",
+            WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+            x, y, dlgW, dlgH, m_hwnd, NULL, m_hInst, NULL);
+        if (!hDlg) return;
+
+        struct SpeedCtx { MainWindow* win; double result; };
+        SpeedCtx* ctx = new SpeedCtx{ this, -1.0 };
+        SetWindowLongPtrW(hDlg, GWLP_USERDATA, (LONG_PTR)ctx);
+
+        CreateWindowExW(0, L"STATIC", L"输入倍速 (0.1 ~ 10.0):",
+            WS_CHILD | WS_VISIBLE, 15, 15, 250, 20, hDlg, NULL, m_hInst, NULL);
+        wchar_t cur[16];
+        swprintf(cur, 16, L"%.2g", m_audio.GetSpeed());
+        CreateWindowExW(0, L"EDIT", cur,
+            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_CENTER,
+            15, 40, 250, 26, hDlg, (HMENU)500, m_hInst, NULL);
+        SendMessageW(GetDlgItem(hDlg, 500), EM_SETLIMITTEXT, 6, 0);
+
+        CreateWindowExW(0, L"BUTTON", L"确定",
+            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            dlgW / 2 - 95, 80, 80, 28, hDlg, (HMENU)IDOK, m_hInst, NULL);
+        CreateWindowExW(0, L"BUTTON", L"取消",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            dlgW / 2 + 15, 80, 80, 28, hDlg, (HMENU)IDCANCEL, m_hInst, NULL);
+
+        EnableWindow(m_hwnd, FALSE);
+        MSG msg;
+        while (IsWindow(hDlg) && GetMessageW(&msg, NULL, 0, 0)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        EnableWindow(m_hwnd, TRUE);
+        SetForegroundWindow(m_hwnd);
+
+        if (ctx->result > 0) {
+            ApplySpeed(ctx->result);
+        }
+        delete ctx;
+        UnregisterClassW(DLG_CLASS, m_hInst);
+    }
+
+
     // Search / Filter
     
     bool SearchMatches(int playlistIdx) {
@@ -1462,7 +1596,7 @@ private:
 
         ctx->hEditCustom = CreateWindowExW(0, L"EDIT", L"2",
             WS_CHILD | WS_VISIBLE | WS_BORDER | ES_CENTER | ES_NUMBER,
-            265, yPos - 1, 40, 22, hDlg, (HMENU)303, m_hInst, NULL);
+            265, yPos, 44, 26, hDlg, (HMENU)303, m_hInst, NULL);
         SendMessageW(ctx->hEditCustom, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
         SendMessageW(ctx->hEditCustom, EM_SETLIMITTEXT, 3, 0);
 
@@ -1681,10 +1815,20 @@ private:
             if (m_filterMap[di] == index) { UpdateLVItem(di); break; }
         }
 
-        if (!meta.empty())
-            SetWindowTextW(m_staticSong, (L"正在播放: " + meta).c_str());
-        else
-            SetWindowTextW(m_staticSong, (L"正在播放: " + GetDisplayName(path)).c_str());
+        {
+            std::wstring status;
+            if (!meta.empty())
+                status = L"正在播放: " + meta;
+            else
+                status = L"正在播放: " + GetDisplayName(path);
+            double speed = m_audio.GetSpeed();
+            if (speed != 1.0) {
+                wchar_t sb[16];
+                swprintf(sb, 16, L" (%.2gx)", speed);
+                status += sb;
+            }
+            SetWindowTextW(m_staticSong, status.c_str());
+        }
 
         SetTimer(m_hwnd, TIMER_ID_SEEK, 500, NULL);
         m_saveTick = 0;
@@ -1877,12 +2021,13 @@ private:
             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile == INVALID_HANDLE_VALUE) return;
         DWORD written;
-        char buf[160];
-        int len = sprintf(buf, "autoplay=%d\nremember_progress=%d\ntray_minimize=%d\nplay_mode=%d\n",
+        char buf[200];
+        int len = sprintf(buf, "autoplay=%d\nremember_progress=%d\ntray_minimize=%d\nplay_mode=%d\nplay_speed=%.2f\n",
                           m_settingsAutoplay ? 1 : 0,
                           m_settingsRememberProgress ? 1 : 0,
                           m_settingsTray ? 1 : 0,
-                          (int)m_audio.GetPlayMode());
+                          (int)m_audio.GetPlayMode(),
+                          m_audio.GetSpeed());
         WriteFile(hFile, buf, (DWORD)len, &written, NULL);
         CloseHandle(hFile);
     }
@@ -1898,6 +2043,7 @@ private:
 
         DWORD size = GetFileSize(hFile, NULL);
         int mode = 0;
+        double speed = 1.0;
         if (size > 0 && size < 2048) {
             char buf[2048] = {};
             DWORD read;
@@ -1916,9 +2062,15 @@ private:
                             m_audio.SetPlayMode(static_cast<PlayMode>(mode));
                         }
                     }
+                    else if (sscanf(p, "play_speed=%lf", &speed) == 1) {
+                        if (speed >= 0.1 && speed <= 10.0) {
+                            m_audio.SetSpeed(speed);
+                        }
+                    }
                 }
                 p = nl + 1;
             }
+            UpdateSpeedMenu();
         }
         CloseHandle(hFile);
     }
@@ -2384,6 +2536,37 @@ static LRESULT CALLBACK StatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) 
             return 0;
         }
         return 0;
+    }
+    return DefWindowProcW(hDlg, msg, wp, lp);
+}
+
+// Speed input dialog proc
+static LRESULT CALLBACK SpeedInputDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_CLOSE) {
+        DestroyWindow(hDlg);
+        return 0;
+    }
+    if (msg == WM_COMMAND) {
+        int id = LOWORD(wp);
+        if (id == IDOK) {
+            wchar_t buf[16];
+            GetWindowTextW(GetDlgItem(hDlg, 500), buf, 16);
+            double val = _wtof(buf);
+            if (val < 0.1 || val > 10.0) {
+                MessageBoxW(hDlg, L"请输入 0.1 ~ 10.0 之间的数值", L"无效输入", MB_OK | MB_ICONWARNING);
+                return 0;
+            }
+            // Store result in context
+            struct SpeedCtx { MainWindow* win; double result; };
+            SpeedCtx* ctx = (SpeedCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
+            if (ctx) ctx->result = val;
+            DestroyWindow(hDlg);
+            return 0;
+        }
+        if (id == IDCANCEL) {
+            DestroyWindow(hDlg);
+            return 0;
+        }
     }
     return DefWindowProcW(hDlg, msg, wp, lp);
 }

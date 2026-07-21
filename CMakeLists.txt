@@ -53,6 +53,7 @@ endif()
 # Link Libraries
 target_link_libraries(MusicPlayer
     bass.lib
+    bass_fx.lib
     winmm.lib
     comctl32.lib
     ole32.lib
@@ -61,10 +62,16 @@ target_link_libraries(MusicPlayer
     gdi32.lib
 )
 
-# Copy BASS DLL to output directory
+# Copy BASS DLLs to output directory
 add_custom_command(TARGET MusicPlayer POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
     "${BASS_LIB_DIR}/bass.dll"
     "$<TARGET_FILE_DIR:MusicPlayer>"
     COMMENT "Copying bass.dll to output directory..."
+)
+add_custom_command(TARGET MusicPlayer POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${BASS_LIB_DIR}/bass_fx.dll"
+    "$<TARGET_FILE_DIR:MusicPlayer>"
+    COMMENT "Copying bass_fx.dll to output directory..."
 )

@@ -2,6 +2,7 @@
 #include <string>
 #include <windows.h>
 #include <bass.h>
+#include <bass_fx.h>
 
 // ============================================
 // Playback Modes
@@ -69,6 +70,10 @@ public:
     PlayMode GetPlayMode() const { return m_playMode; }
     PlayMode CyclePlayMode();
 
+    // 倍速播放 (0.1 ~ 10.0)
+    void SetSpeed(double speed);
+    double GetSpeed() const { return m_speed; }
+
     // 元数据（延迟加载，播放时才读取）
     std::wstring GetFormattedMetadata() const;
 
@@ -95,6 +100,7 @@ private:
     bool    m_playing;      // 是否正在播放
     bool    m_paused;       // 是否已暂停
     PlayMode m_playMode;    // 当前播放模式
+    double m_speed;         // 当前倍速 (1.0 = 正常)
     HWND    m_notifyHwnd;   // 通知窗口
     UINT    m_notifyMsg;    // 通知消息
     AudioError m_error;     // 最后一次操作的错误码

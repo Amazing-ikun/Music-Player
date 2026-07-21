@@ -10,6 +10,7 @@ AudioEngine::AudioEngine()
     , m_playing(false)
     , m_paused(false)
     , m_playMode(PlayMode::Sequential)
+    , m_speed(1.0)
     , m_notifyHwnd(NULL)
     , m_notifyMsg(0)
     , m_error(AudioError::Success)
@@ -26,6 +27,11 @@ bool AudioEngine::Initialize(HWND hwnd) {
     // 使用默认音频设备，44.1kHz采样率
     if (!BASS_Init(-1, 44100, 0, hwnd, NULL)) {
         m_error = MapBassError(BASS_ErrorGetCode());
+        return false;
+    }
+    // 检查 BASS_FX 可用
+    if (HIWORD(BASS_FX_GetVersion()) != BASSVERSION) {
+        m_error = AudioError::MissingCodec;
         return false;
     }
     m_error = AudioError::Success;
@@ -54,14 +60,24 @@ bool AudioEngine::Load(const std::wstring& filePath) {
         m_stream = 0;
     }
 
-    // 创建流式解码，BASS_STREAM_AUTOFREE 在播放结束后自动释放
-    m_stream = BASS_StreamCreateFile(FALSE, filePath.c_str(), 0, 0,
-        BASS_STREAM_AUTOFREE | BASS_UNICODE);
-
-    if (!m_stream) {
+    // 创建临时解码流，然后用 BASS_FX_TempoCreate 包装以实现变速不变调
+    HSTREAM decoder = BASS_StreamCreateFile(FALSE, filePath.c_str(), 0, 0,
+        BASS_STREAM_DECODE | BASS_UNICODE);
+    if (!decoder) {
         m_error = MapBassError(BASS_ErrorGetCode());
         return false;
     }
+
+    m_stream = BASS_FX_TempoCreate(decoder, BASS_FX_FREESOURCE | BASS_STREAM_AUTOFREE);
+    if (!m_stream) {
+        m_error = MapBassError(BASS_ErrorGetCode());
+        BASS_StreamFree(decoder);
+        return false;
+    }
+
+    // 应用当前倍速
+    double tempo = (m_speed - 1.0) * 100.0;
+    BASS_ChannelSetAttribute(m_stream, BASS_ATTRIB_TEMPO, tempo);
 
     m_error = AudioError::Success;
 
@@ -223,6 +239,16 @@ std::wstring AudioEngine::GetFormattedMetadata() const {
     if (!wt.empty())  return wt;
     if (!wa.empty())  return wa;
     return L"";
+}
+
+void AudioEngine::SetSpeed(double speed) {
+    if (speed < 0.1) speed = 0.1;
+    if (speed > 10.0) speed = 10.0;
+    m_speed = speed;
+    if (m_stream) {
+        double tempo = (speed - 1.0) * 100.0;
+        BASS_ChannelSetAttribute(m_stream, BASS_ATTRIB_TEMPO, tempo);
+    }
 }
 
 // 通知：歌曲已播放结束（AUTOFREE已释放流）

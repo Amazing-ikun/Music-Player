@@ -17,6 +17,11 @@ build/
 .playlist.txt
 .lastfolder.txt
 .volume.txt
+.hotkeys.txt
+.settings.txt
+.lastsong.txt
+.history.txt
+.stats_export.json
 
 # Claude
 .claude/

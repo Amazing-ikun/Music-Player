@@ -8,9 +8,12 @@
 #include <shlobj.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdarg>
 #include <ctime>
 #include <string>
 #include <vector>
+#include <map>
+#include <algorithm>
 #include <utility>
 
 #include "Resource.h"
@@ -65,6 +68,31 @@ static std::wstring GetExeDirectory() {
     wchar_t* last = wcsrchr(path, L'\\');
     if (last) *last = L'\0';
     return path;
+}
+
+static void WriteLog(const wchar_t* format, ...) {
+    std::wstring filePath = GetExeDirectory() + L"\\.error.log";
+    HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE,
+        FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return;
+    SetFilePointer(hFile, 0, NULL, FILE_END);
+
+    time_t now = time(NULL);
+    struct tm* t = localtime(&now);
+    wchar_t ts[64];
+    wcsftime(ts, 64, L"[%Y-%m-%d %H:%M:%S] ", t);
+
+    wchar_t buf[1024];
+    va_list args;
+    va_start(args, format);
+    vswprintf(buf, 1024, format, args);
+    va_end(args);
+
+    DWORD written = 0;
+    WriteFile(hFile, ts, (DWORD)(wcslen(ts) * sizeof(wchar_t)), &written, NULL);
+    WriteFile(hFile, buf, (DWORD)(wcslen(buf) * sizeof(wchar_t)), &written, NULL);
+    WriteFile(hFile, L"\n", 2, &written, NULL);
+    CloseHandle(hFile);
 }
 
 static const wchar_t* COL_LABELS[4] = { L"#", L"标题", L"专辑", L"时长" };
@@ -158,7 +186,7 @@ struct StatsDlgCtx {
     MainWindow* win;
     int rangeDays;
     HWND hRadio7, hRadio30, hRadioCustom, hEditCustom;
-    HWND hDayList, hWeekList, hTotalText;
+    HWND hDayList, hWeekList, hPlayCountList, hTotalText;
     HWND hDlg;
 };
 static LRESULT CALLBACK StatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
@@ -266,6 +294,9 @@ private:
     std::chrono::steady_clock::time_point m_listenStart;
     int m_saveTick;
 
+    // ---- Play count tracking ----
+    std::map<std::wstring, int> m_playCount;
+
     HFONT m_hFont;
 
     friend LRESULT CALLBACK StatsDlgProc(HWND, UINT, WPARAM, LPARAM);
@@ -296,6 +327,7 @@ private:
             case WM_GETMINMAXINFO:     OnMinMaxInfo((MINMAXINFO*)lp);  return 0;
             case WM_COMMAND:           OnCommand(wp, lp);            return 0;
             case WM_HSCROLL:           OnHScroll(wp, lp);            return 0;
+            case WM_MOUSEWHEEL:        OnMouseWheel(wp);             return 0;
             case WM_TIMER:             if (wp == TIMER_ID_SEEK) OnTimer(); return 0;
             case WM_HOTKEY:            OnGlobalHotkey((int)wp);     return 0;
             case WM_NOTIFY:            return OnNotify(wp, lp);
@@ -337,6 +369,7 @@ private:
         RegisterStatsWindowClass();
 
         if (!m_audio.Initialize(m_hwnd)) {
+            WriteLog(L"初始化音频引擎失败: %ls", m_audio.GetErrorMessage().c_str());
             MessageBoxW(m_hwnd,
                 (L"无法初始化音频引擎 (bass.dll)。\n\n"
                  L"请确保 bass.dll 位于程序目录或系统路径中。\n"
@@ -345,11 +378,13 @@ private:
                 L"音频初始化失败", MB_OK | MB_ICONWARNING);
         }
 
+        LoadPlayCount();
         LoadSettings();
         UpdateSettingsMenu();
         UpdateModeUI();
 
         if (!LoadPlaylist()) {
+            WriteLog(L"播放列表文件不存在或为空，尝试加载上次打开的文件夹");
             LoadFromLastFolder();
         }
 
@@ -383,6 +418,7 @@ private:
         StopListening();
         m_history.Save(GetExeDirectory() + L"\\.history.txt");
         if (m_settingsRememberProgress) SaveLastSong();
+        SavePlayCount();
         SavePlaylist();
         SaveVolume();
         SaveSettings();
@@ -682,6 +718,18 @@ private:
             m_audio.SetVolume(vol);
             UpdateVolLabel();
         }
+    }
+
+    // WM_MOUSEWHEEL
+    void OnMouseWheel(WPARAM wp) {
+        int delta = GET_WHEEL_DELTA_WPARAM(wp);
+        int step = (delta > 0) ? 5 : -5;
+        if (GetAsyncKeyState(VK_CONTROL) & 0x8000) step *= 2;
+        int vol = (int)SendMessageW(m_sliderVol, TBM_GETPOS, 0, 0) + step;
+        vol = (vol < 0) ? 0 : (vol > 100 ? 100 : vol);
+        m_audio.SetVolume(vol);
+        SendMessageW(m_sliderVol, TBM_SETPOS, TRUE, vol);
+        UpdateVolLabel();
     }
 
     // WM_NOTIFY
@@ -1360,7 +1408,7 @@ private:
 
     void ShowStatsWindow() {
         const wchar_t STATS_CLASS[] = L"StatsWindow";
-        int dlgW = 620, dlgH = 520;
+        int dlgW = 620, dlgH = 600;
         int sw = GetSystemMetrics(SM_CXSCREEN);
         int sh = GetSystemMetrics(SM_CYSCREEN);
         int x = (sw - dlgW) / 2, y = (sh - dlgH) / 2;
@@ -1433,7 +1481,7 @@ private:
         yPos += 20;
         ctx->hDayList = CreateWindowExW(0, WC_LISTVIEWW, NULL,
             WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_NOSORTHEADER,
-            15, yPos, dlgW - 30, 190, hDlg, NULL, m_hInst, NULL);
+            15, yPos, dlgW - 30, 130, hDlg, NULL, m_hInst, NULL);
         ListView_SetExtendedListViewStyle(ctx->hDayList, LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT);
 
         LVCOLUMNW lc = {};
@@ -1443,7 +1491,7 @@ private:
         lc.cx = 70;  lc.pszText = (LPWSTR)L"星期"; ListView_InsertColumn(ctx->hDayList, 1, &lc);
         lc.cx = 150; lc.pszText = (LPWSTR)L"听歌时长"; ListView_InsertColumn(ctx->hDayList, 2, &lc);
 
-        yPos += 198;
+        yPos += 138;
 
         CreateWindowExW(0, L"STATIC", L"每周统计",
             WS_CHILD | WS_VISIBLE, 15, yPos, 100, 20, hDlg, NULL, m_hInst, NULL);
@@ -1451,14 +1499,29 @@ private:
         yPos += 20;
         ctx->hWeekList = CreateWindowExW(0, WC_LISTVIEWW, NULL,
             WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_NOSORTHEADER,
-            15, yPos, dlgW - 30, 100, hDlg, NULL, m_hInst, NULL);
+            15, yPos, dlgW - 30, 70, hDlg, NULL, m_hInst, NULL);
         ListView_SetExtendedListViewStyle(ctx->hWeekList, LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT);
 
         lc.cx = 100; lc.pszText = (LPWSTR)L"周"; ListView_InsertColumn(ctx->hWeekList, 0, &lc);
         lc.cx = 140; lc.pszText = (LPWSTR)L"日期范围"; ListView_InsertColumn(ctx->hWeekList, 1, &lc);
         lc.cx = 150; lc.pszText = (LPWSTR)L"累计时长"; ListView_InsertColumn(ctx->hWeekList, 2, &lc);
 
-        yPos += 108;
+        yPos += 78;
+
+        CreateWindowExW(0, L"STATIC", L"热门歌曲（播放次数）",
+            WS_CHILD | WS_VISIBLE, 15, yPos, 180, 20, hDlg, NULL, m_hInst, NULL);
+
+        yPos += 20;
+        ctx->hPlayCountList = CreateWindowExW(0, WC_LISTVIEWW, NULL,
+            WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_NOSORTHEADER,
+            15, yPos, dlgW - 30, 90, hDlg, NULL, m_hInst, NULL);
+        ListView_SetExtendedListViewStyle(ctx->hPlayCountList, LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT);
+
+        lc.cx = 40;  lc.pszText = (LPWSTR)L"#";   ListView_InsertColumn(ctx->hPlayCountList, 0, &lc);
+        lc.cx = 250; lc.pszText = (LPWSTR)L"歌曲"; ListView_InsertColumn(ctx->hPlayCountList, 1, &lc);
+        lc.cx = 80;  lc.pszText = (LPWSTR)L"次数"; ListView_InsertColumn(ctx->hPlayCountList, 2, &lc);
+
+        yPos += 98;
 
         ctx->hTotalText = CreateWindowExW(0, L"STATIC", L"",
             WS_CHILD | WS_VISIBLE | SS_CENTER,
@@ -1526,6 +1589,27 @@ private:
             ListView_SetItemText(ctx->hWeekList, (int)i, 2, tbuf);
         }
 
+        // Play count
+        ListView_DeleteAllItems(ctx->hPlayCountList);
+        // Sort by count descending, take top 20
+        std::vector<std::pair<std::wstring, int>> sorted(m_playCount.begin(), m_playCount.end());
+        std::sort(sorted.begin(), sorted.end(),
+            [](const auto& a, const auto& b) { return a.second > b.second; });
+        int limit = (int)sorted.size() < 20 ? (int)sorted.size() : 20;
+        for (int i = 0; i < limit; i++) {
+            wchar_t rank[8];
+            swprintf(rank, 8, L"%d", i + 1);
+            LVITEMW item = {};
+            item.mask = LVIF_TEXT;
+            item.iItem = i;
+            item.pszText = rank;
+            ListView_InsertItem(ctx->hPlayCountList, &item);
+            ListView_SetItemText(ctx->hPlayCountList, i, 1, (LPWSTR)GetDisplayName(sorted[i].first).c_str());
+            wchar_t cnt[16];
+            swprintf(cnt, 16, L"%d", sorted[i].second);
+            ListView_SetItemText(ctx->hPlayCountList, i, 2, cnt);
+        }
+
         wchar_t tbuf[128], label[256];
         FormatListenTime(total, tbuf, 128);
         swprintf(label, 256, L"总计: %ls", tbuf);
@@ -1565,6 +1649,7 @@ private:
         if (!m_audio.Load(path)) {
             std::wstring errMsg = m_audio.GetErrorMessage();
             std::wstring displayName = GetDisplayName(path);
+            WriteLog(L"加载文件失败 [%ls]: %ls", errMsg.c_str(), path.c_str());
             SetWindowTextW(m_staticSong,
                 (L"无法加载: " + displayName + L" (" + errMsg + L")").c_str());
             MessageBoxW(m_hwnd,
@@ -1576,6 +1661,7 @@ private:
         m_currentIndex = index;
         m_audio.Play();
         StartListening();
+        m_playCount[path]++;
         UpdateUI();
         UpdatePlaylistSelection();
 
@@ -2005,6 +2091,55 @@ private:
     }
 
     
+    // Play count persistence
+    void SavePlayCount() {
+        if (m_playCount.empty()) return;
+        std::wstring filePath = GetExeDirectory() + L"\\.playcount.txt";
+        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return;
+        DWORD written;
+        const WORD bom = 0xFEFF;
+        WriteFile(hFile, &bom, 2, &written, NULL);
+        for (const auto& entry : m_playCount) {
+            std::wstring line = entry.first + L"=" + std::to_wstring(entry.second) + L"\n";
+            WriteFile(hFile, line.c_str(), (DWORD)(line.size() * sizeof(wchar_t)), &written, NULL);
+        }
+        CloseHandle(hFile);
+    }
+
+    void LoadPlayCount() {
+        std::wstring filePath = GetExeDirectory() + L"\\.playcount.txt";
+        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
+            FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return;
+        DWORD size = GetFileSize(hFile, NULL);
+        if (size > 2) {
+            DWORD read = 0;
+            std::wstring buf(size / 2 + 1, L'\0');
+            ReadFile(hFile, &buf[0], size, &read, NULL);
+            buf[read / 2] = L'\0';
+            CloseHandle(hFile);
+            const wchar_t* p = buf.c_str();
+            if (*p == 0xFEFF) p++;
+            while (*p) {
+                const wchar_t* nl = wcschr(p, L'\n');
+                size_t lineLen = nl ? (size_t)(nl - p) : wcslen(p);
+                if (lineLen > 0 && p[lineLen-1] == L'\r') --lineLen;
+                if (lineLen > 0) {
+                    std::wstring line(p, lineLen);
+                    size_t eq = line.find(L'=');
+                    if (eq != std::wstring::npos) {
+                        std::wstring path = line.substr(0, eq);
+                        int count = _wtoi(line.substr(eq + 1).c_str());
+                        if (count > 0) m_playCount[path] = count;
+                    }
+                }
+                p = nl ? nl + 1 : p + lineLen;
+            }
+        } else { CloseHandle(hFile); }
+    }
+
     // Playlist persistence
     void SavePlaylist() {
         if (m_playlist.IsEmpty()) return;

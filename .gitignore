@@ -21,6 +21,8 @@ build/
 .settings.txt
 .lastsong.txt
 .history.txt
+.playcount.txt
+.error.log
 .stats_export.json
 
 # Claude

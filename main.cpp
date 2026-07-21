@@ -694,6 +694,18 @@ private:
     }
 
     // Sort
+    void UpdateColumnHeaders(int activeColumn) {
+        for (int i = 0; i < 4; i++) {
+            std::wstring label = COL_LABELS[i];
+            if (i == activeColumn)
+                label += m_sortAscending ? L" ▲" : L" ▼";
+            LVCOLUMNW lc = {};
+            lc.mask = LVCF_TEXT;
+            lc.pszText = &label[0];
+            ListView_SetColumn(m_playlistLV, i, &lc);
+        }
+    }
+
     void OnLVColumnClick(int column) {
         if (column == m_sortColumn)
             m_sortAscending = !m_sortAscending;
@@ -707,16 +719,7 @@ private:
             curPath = m_playlist.GetFile(m_currentIndex);
 
         m_playlist.Sort(column, m_sortAscending);
-
-        for (int i = 0; i < 4; i++) {
-            std::wstring label = COL_LABELS[i];
-            if (i == column)
-                label += m_sortAscending ? L" ▲" : L" ▼";
-            LVCOLUMNW lc = {};
-            lc.mask = LVCF_TEXT;
-            lc.pszText = &label[0];
-            ListView_SetColumn(m_playlistLV, i, &lc);
-        }
+        UpdateColumnHeaders(column);
 
         RefreshPlaylistUI();
 
@@ -808,10 +811,12 @@ private:
             KillTimer(m_hwnd, TIMER_ID_SEEK);
             m_currentIndex = -1;
             m_userDraggingSeek = false;
-            m_sortColumn = -1;
 
             SaveLastFolder(path);
             m_playlist.ScanFolder(path);
+            m_sortColumn = 1;
+            m_sortAscending = true;
+            UpdateColumnHeaders(1);
             RefreshPlaylistUI();
 
             if (m_shuffleOrder.size() != (size_t)m_playlist.GetCount())
@@ -875,7 +880,26 @@ private:
         }
 
         if (added) {
+            // Sort by title after adding files
+            std::wstring curPath;
+            if (m_currentIndex >= 0 && m_currentIndex < m_playlist.GetCount())
+                curPath = m_playlist.GetFile(m_currentIndex);
+            m_playlist.Sort(1, true);
+            m_sortColumn = 1;
+            m_sortAscending = true;
+            UpdateColumnHeaders(1);
+            // Restore current index after sort
+            if (!curPath.empty()) {
+                m_currentIndex = -1;
+                for (int i = 0; i < m_playlist.GetCount(); i++) {
+                    if (m_playlist.GetFile(i) == curPath) {
+                        m_currentIndex = i;
+                        break;
+                    }
+                }
+            }
             RefreshPlaylistUI();
+            UpdatePlaylistSelection();
             if (m_audio.GetPlayMode() == PlayMode::Shuffle) Reshuffle();
             if (!hadItems) PlayFile(0);
             else {
@@ -1983,6 +2007,11 @@ private:
             }
             loaded = !m_playlist.IsEmpty();
         }
+        if (loaded) {
+            m_playlist.Sort(1, true);
+            m_sortColumn = 1;
+            m_sortAscending = true;
+        }
         CloseHandle(hFile);
         RefreshPlaylistUI();
         if (loaded)
@@ -2027,6 +2056,8 @@ private:
                 if (GetFileAttributesW(folder.c_str()) != INVALID_FILE_ATTRIBUTES &&
                     (GetFileAttributesW(folder.c_str()) & FILE_ATTRIBUTE_DIRECTORY)) {
                     m_playlist.ScanFolder(folder);
+                    m_sortColumn = 1;
+                    m_sortAscending = true;
                     RefreshPlaylistUI();
                     if (!m_playlist.IsEmpty()) {
                         SetWindowTextW(m_staticSong,

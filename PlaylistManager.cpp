@@ -14,10 +14,7 @@ bool PlaylistManager::IsAudioExtension(const std::wstring& ext) {
 void PlaylistManager::ScanFolder(const std::wstring& folderPath) {
     m_songs.clear();
     ScanDirectory(folderPath);
-    std::sort(m_songs.begin(), m_songs.end(),
-        [](const SongInfo& a, const SongInfo& b) {
-            return _wcsicmp(a.filePath.c_str(), b.filePath.c_str()) < 0;
-        });
+    Sort(1, true);
 }
 
 void PlaylistManager::ScanDirectory(const std::wstring& dirPath) {
@@ -142,14 +139,19 @@ void PlaylistManager::Sort(int column, bool ascending) {
     std::sort(m_songs.begin(), m_songs.end(),
         [column, ascending](const SongInfo& a, const SongInfo& b) {
             int cmp = 0;
+            auto cmpStr = [](const std::wstring& x, const std::wstring& y) -> int {
+                return CompareStringW(LOCALE_USER_DEFAULT,
+                    NORM_LINGUISTIC_CASING | SORT_DIGITSASNUMBERS,
+                    x.c_str(), -1, y.c_str(), -1) - 2;
+            };
             switch (column) {
                 case 1: // 标题
-                    cmp = _wcsicmp(a.title.c_str(), b.title.c_str());
-                    if (cmp == 0) cmp = _wcsicmp(a.artist.c_str(), b.artist.c_str());
+                    cmp = cmpStr(a.title, b.title);
+                    if (cmp == 0) cmp = cmpStr(a.artist, b.artist);
                     break;
                 case 2: // 专辑
-                    cmp = _wcsicmp(a.album.c_str(), b.album.c_str());
-                    if (cmp == 0) cmp = _wcsicmp(a.title.c_str(), b.title.c_str());
+                    cmp = cmpStr(a.album, b.album);
+                    if (cmp == 0) cmp = cmpStr(a.title, b.title);
                     break;
                 case 3: // 时长
                     if (a.duration < b.duration) cmp = -1;

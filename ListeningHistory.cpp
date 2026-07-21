@@ -189,20 +189,15 @@ std::vector<WeekSummary> ListeningHistory::GetWeeklySummaries(
         KeyToDate(mon, y1, m1, d1);
         int weekNum = GetISOWeek(y1, m1, d1);
 
-        char label[32];
-        snprintf(label, sizeof(label), "第%d周", weekNum);
-
-        char range[32];
-        snprintf(range, sizeof(range), "%02d/%02d-%02d/%02d",
-                 m1, d1,
-                 [&](){ int y2,m2,d2; KeyToDate(sun,y2,m2,d2); return m2; }(),
-                 [&](){ int y2,m2,d2; KeyToDate(sun,y2,m2,d2); return d2; }());
+        int y2, m2, d2;
+        KeyToDate(sun, y2, m2, d2);
 
         WeekSummary ws;
-        wchar_t wlabel[64], wrange[64];
-        swprintf(wlabel, 64, L"%hs", label);
-        swprintf(wrange, 64, L"%hs", range);
+        wchar_t wlabel[64];
+        swprintf(wlabel, 64, L"第%d周", weekNum);
         ws.label = wlabel;
+        wchar_t wrange[64];
+        swprintf(wrange, 64, L"%02d/%02d-%02d/%02d", m1, d1, m2, d2);
         ws.dateRange = wrange;
         ws.seconds = entry.second;
         result.push_back(ws);

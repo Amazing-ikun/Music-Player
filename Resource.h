@@ -12,6 +12,7 @@
 #define IDC_STAT_TIME       1008
 #define IDC_STAT_SONG       1009
 #define IDC_STAT_VOL        1010
+#define IDC_CTRL_PANEL      1012
 
 // Menu Command IDs
 #define ID_FILE_OPENFOLDER  2001

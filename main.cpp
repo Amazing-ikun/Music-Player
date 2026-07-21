@@ -73,9 +73,7 @@ static const char* HK_KEY_NAMES[7] = {
     "playpause", "prev", "next", "volup", "voldn", "restore", "minimize"
 };
 
-// ==========================================
 // HotkeyBinding - 单个快捷键配置
-// ==========================================
 struct HotkeyBinding {
     int    id;
     const wchar_t* actionName;
@@ -154,9 +152,7 @@ struct HKDlgCtx { HotkeyBinding* bindings; int recording; int count; MainWindow*
 
 static LRESULT CALLBACK HotkeyDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
 
-// ==========================================
 // MainWindow
-// ==========================================
 class MainWindow {
 public:
     MainWindow()
@@ -170,6 +166,7 @@ public:
         , m_shufflePos(0)
         , m_settingsAutoplay(true), m_settingsRememberProgress(true)
         , m_settingsTray(true), m_trayIconAdded(false)
+        , m_ctrlPanel(NULL)
     {
         srand((unsigned)time(NULL));
         InitDefaultHotkeys();
@@ -217,6 +214,7 @@ private:
     HWND m_btnPrev, m_btnPlay, m_btnNext, m_btnMode;
     HWND m_trackSeek, m_sliderVol, m_staticVolPct;
     HWND m_staticTime, m_staticSong;
+    HWND m_ctrlPanel;
 
     // ---- State ----
     AudioEngine      m_audio;
@@ -272,6 +270,17 @@ private:
             case WM_TIMER:             if (wp == TIMER_ID_SEEK) OnTimer(); return 0;
             case WM_HOTKEY:            OnGlobalHotkey((int)wp);     return 0;
             case WM_NOTIFY:            return OnNotify(wp, lp);
+            case WM_CTLCOLORSTATIC: {
+                HWND hCtrl = (HWND)lp;
+                if (hCtrl == m_ctrlPanel || hCtrl == m_staticVolPct ||
+                    hCtrl == m_staticTime || hCtrl == m_staticSong) {
+                    HDC hdc = (HDC)wp;
+                    SetDCBrushColor(hdc, RGB(240, 240, 240));
+                    SetBkColor(hdc, RGB(240, 240, 240));
+                    return (LRESULT)GetStockObject(DC_BRUSH);
+                }
+                return DefWindowProcW(m_hwnd, msg, wp, lp);
+            }
             default:
                 if (msg == WM_USER_SONG_END) { OnSongEnd(); return 0; }
                 if (msg == WM_APP_TRAY) { HandleTrayMessage(wp, lp); return 0; }
@@ -286,7 +295,7 @@ private:
         m_hotkeys[2] = { HKID_NEXT,      L"下一首",         VK_RIGHT, MOD_CONTROL };
         m_hotkeys[3] = { HKID_VOLUP,     L"音量增加",       VK_UP,    MOD_CONTROL };
         m_hotkeys[4] = { HKID_VOLDN,     L"音量减小",       VK_DOWN,  MOD_CONTROL };
-        m_hotkeys[5] = { HKID_RESTORE,   L"从托盘恢复",     'O',     MOD_CONTROL };
+        m_hotkeys[5] = { HKID_RESTORE,   L"从托盘恢复",     'J',     MOD_CONTROL };
         m_hotkeys[6] = { HKID_MINIMIZE,  L"最小化到托盘",   'K',     MOD_CONTROL };
     }
 
@@ -307,8 +316,8 @@ private:
         LoadSettings();
         UpdateSettingsMenu();
 
-        if (!LoadFromLastFolder()) {
-            LoadPlaylist();
+        if (!LoadPlaylist()) {
+            LoadFromLastFolder();
         }
 
         LoadVolume();
@@ -345,9 +354,7 @@ private:
         DestroyWindow(m_hwnd);
     }
 
-    // ==========================================
     // Menu bar
-    // ==========================================
     void CreateMenuBar() {
         HMENU bar = CreateMenu();
 
@@ -412,6 +419,11 @@ private:
             WS_CHILD | WS_VISIBLE | WS_BORDER | ES_LEFT,
             0, 0, 0, 0, m_hwnd, (HMENU)IDC_SEARCH_EDIT, m_hInst, NULL);
 
+        // Background panel for bottom controls
+        m_ctrlPanel = CreateWindowExW(0, L"STATIC", NULL,
+            WS_CHILD | WS_VISIBLE,
+            0, 0, 0, 0, m_hwnd, (HMENU)IDC_CTRL_PANEL, m_hInst, NULL);
+
         m_btnMode = CreateWindowExW(0, L"BUTTON", L"顺序播放",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             0, 0, 0, 0, m_hwnd, (HMENU)IDC_BTN_MODE, m_hInst, NULL);
@@ -465,8 +477,10 @@ private:
         int w = rc.right, h = rc.bottom;
         const int M = 8;
         const int searchH = 22;
-        const int ctrlAreaH = 118;
-        int listH = h - ctrlAreaH - searchH - M;
+        const int ctrlPanelH = 96;  // bottom panel height: controls + padding
+        const int lvY = M + searchH + M;
+        int panelY = h - ctrlPanelH;
+        int listH = panelY - lvY - M;  // M gap between listview and panel
         if (listH < 30) listH = 30;
 
         // Search label + edit at top
@@ -480,25 +494,29 @@ private:
             SendMessageW(m_searchEdit, WM_SETFONT, (WPARAM)m_hFont, TRUE);
         }
 
-        int lvY = M + searchH + M;
+        // Listview
         SetWindowPos(m_playlistLV, NULL, M, lvY, w - 2 * M, listH, SWP_NOZORDER);
 
-        int y = listH;
+        // Control panel at bottom (created before buttons, so naturally behind them)
+        SetWindowPos(m_ctrlPanel, NULL, 0, panelY, w, ctrlPanelH, SWP_NOZORDER);
+
+        // Controls within panel area
+        int y = panelY;
         const int BH = 28;
 
-        SetWindowPos(m_btnMode, NULL, M, y + 2, 90, BH, SWP_NOZORDER);
+        SetWindowPos(m_btnMode, NULL, M, y + 4, 90, BH, SWP_NOZORDER);
         int bx = M + 96;
-        SetWindowPos(m_btnPrev, NULL, bx, y + 2, 36, BH, SWP_NOZORDER);
+        SetWindowPos(m_btnPrev, NULL, bx, y + 4, 36, BH, SWP_NOZORDER);
         bx += 42;
-        SetWindowPos(m_btnPlay, NULL, bx, y + 2, 36, BH, SWP_NOZORDER);
+        SetWindowPos(m_btnPlay, NULL, bx, y + 4, 36, BH, SWP_NOZORDER);
         bx += 42;
-        SetWindowPos(m_btnNext, NULL, bx, y + 2, 36, BH, SWP_NOZORDER);
+        SetWindowPos(m_btnNext, NULL, bx, y + 4, 36, BH, SWP_NOZORDER);
 
         int volPctW = 36;
         int volW = 130;
         int volX = w - M - volPctW - volW;
-        SetWindowPos(m_staticVolPct, NULL, volX, y + 4, volPctW, 20, SWP_NOZORDER);
-        SetWindowPos(m_sliderVol, NULL, volX + volPctW, y + 2, volW, BH, SWP_NOZORDER);
+        SetWindowPos(m_staticVolPct, NULL, volX, y + 6, volPctW, 20, SWP_NOZORDER);
+        SetWindowPos(m_sliderVol, NULL, volX + volPctW, y + 4, volW, BH, SWP_NOZORDER);
 
         y += BH + 6;
         SetWindowPos(m_trackSeek, NULL, M, y + 2, w - 2 * M, 24, SWP_NOZORDER);
@@ -508,6 +526,9 @@ private:
         SetWindowPos(m_staticTime, NULL, M, y + 2, timeW, 20, SWP_NOZORDER);
         SetWindowPos(m_staticSong, NULL, M + timeW + 8, y + 2,
                      w - M - timeW - 16, 20, SWP_NOZORDER);
+
+        // Force immediate redraw of the control panel area
+        InvalidateRect(m_hwnd, NULL, FALSE);
     }
 
     void CenterWindow() {
@@ -527,9 +548,7 @@ private:
         mmi->ptMinTrackSize.y = MIN_H;
     }
 
-    // ==========================================
     // WM_COMMAND
-    // ==========================================
     void OnCommand(WPARAM wp, LPARAM lp) {
         WORD id = LOWORD(wp);
         HWND hCtrl = (HWND)lp;
@@ -584,9 +603,7 @@ private:
         }
     }
 
-    // ==========================================
     // WM_HSCROLL
-    // ==========================================
     void OnHScroll(WPARAM wp, LPARAM lp) {
         HWND hCtrl = (HWND)lp;
         WORD code = LOWORD(wp);
@@ -615,9 +632,7 @@ private:
         }
     }
 
-    // ==========================================
     // WM_NOTIFY
-    // ==========================================
     LRESULT OnNotify(WPARAM, LPARAM lp) {
         LPNMHDR nmh = (LPNMHDR)lp;
         if (nmh->hwndFrom == m_playlistLV) {
@@ -639,9 +654,7 @@ private:
         return 0;
     }
 
-    // ==========================================
     // Sort
-    // ==========================================
     void OnLVColumnClick(int column) {
         if (column == m_sortColumn)
             m_sortAscending = !m_sortAscending;
@@ -680,9 +693,7 @@ private:
         }
     }
 
-    // ==========================================
     // Timer
-    // ==========================================
     void OnTimer() {
         if (m_audio.IsLoaded() && !m_userDraggingSeek) {
             UpdateSeekDisplay();
@@ -690,9 +701,7 @@ private:
         }
     }
 
-    // ==========================================
     // Fisher-Yates shuffle
-    // ==========================================
     void Reshuffle() {
         int count = m_playlist.GetCount();
         if (count == 0) return;
@@ -705,9 +714,7 @@ private:
         m_shufflePos = 0;
     }
 
-    // ==========================================
     // Song end
-    // ==========================================
     void OnSongEnd() {
         KillTimer(m_hwnd, TIMER_ID_SEEK);
         m_audio.NotifyEndOfSong();
@@ -746,9 +753,7 @@ private:
         }
     }
 
-    // ==========================================
     // Open folder
-    // ==========================================
     void OpenFolder() {
         BROWSEINFOW bi = {};
         bi.hwndOwner = m_hwnd;
@@ -783,9 +788,7 @@ private:
         CoTaskMemFree(pidl);
     }
 
-    // ==========================================
     // Add files
-    // ==========================================
     void AddFiles() {
         wchar_t buf[65536] = {};
 
@@ -844,20 +847,13 @@ private:
         }
     }
 
-    // ==========================================
     // Playback controls
-    // ==========================================
     void OnPlayPause() {
         if (!m_audio.IsLoaded()) return;
         if (m_audio.IsPlaying()) {
             m_audio.Pause();
             SetWindowTextW(m_staticSong, L"已暂停");
-            std::wstring tipText;
-            if (m_currentIndex >= 0 && m_currentIndex < m_playlist.GetCount()) {
-                std::wstring meta = m_audio.GetFormattedMetadata();
-                tipText = meta.empty() ? GetDisplayName(m_playlist.GetFile(m_currentIndex)) : meta;
-            }
-            UpdateTrayTip(L"已暂停: " + tipText);
+            UpdateTrayTip();
         } else {
             m_audio.Play();
             if (m_currentIndex >= 0 && m_currentIndex < m_playlist.GetCount()) {
@@ -865,10 +861,10 @@ private:
                 const auto& path = m_playlist.GetFile(m_currentIndex);
                 if (!meta.empty()) {
                     SetWindowTextW(m_staticSong, (L"正在播放: " + meta).c_str());
-                    UpdateTrayTip(L"正在播放: " + meta);
+                    UpdateTrayTip();
                 } else {
                     SetWindowTextW(m_staticSong, (L"正在播放: " + GetDisplayName(path)).c_str());
-                    UpdateTrayTip(L"正在播放: " + GetDisplayName(path));
+                    UpdateTrayTip();
                 }
             }
             SetTimer(m_hwnd, TIMER_ID_SEEK, 500, NULL);
@@ -937,9 +933,9 @@ private:
             MF_BYCOMMAND | (m_settingsTray ? MF_CHECKED : MF_UNCHECKED));
     }
 
-    // ==========================================
+    
     // Search / Filter
-    // ==========================================
+    
     bool SearchMatches(int playlistIdx) {
         const auto& song = m_playlist.GetSong(playlistIdx);
         if (song.title.empty() && song.artist.empty() && song.album.empty())
@@ -991,9 +987,9 @@ private:
         }
     }
 
-    // ==========================================
+    
     // Keyboard shortcuts
-    // ==========================================
+    
     bool HandleAccelerator(int vk) {
         int heldMod = 0;
         if (GetAsyncKeyState(VK_CONTROL) & 0x8000) heldMod |= MOD_CONTROL;
@@ -1059,9 +1055,9 @@ private:
         UpdateVolLabel();
     }
 
-    // ==========================================
+    
     // Hotkey config dialog
-    // ==========================================
+    
     void ShowHotkeyDialog() {
         HotkeyBinding tmp[7];
         memcpy(tmp, m_hotkeys, sizeof(m_hotkeys));
@@ -1167,9 +1163,9 @@ private:
         UnregisterClassW(DLG_CLASS, m_hInst);
     }
 
-    // ==========================================
+    
     // Play file
-    // ==========================================
+    
     void PlayFile(int index) {
         if (index < 0 || index >= m_playlist.GetCount()) return;
 
@@ -1210,17 +1206,16 @@ private:
 
         SetTimer(m_hwnd, TIMER_ID_SEEK, 500, NULL);
 
-        std::wstring tipText = meta.empty() ? GetDisplayName(path) : meta;
-        UpdateTrayTip(L"正在播放: " + tipText);
+        UpdateTrayTip();
 
         if (m_settingsRememberProgress) {
             SaveLastSong();
         }
     }
 
-    // ==========================================
+    
     // UI helpers
-    // ==========================================
+    
     void UpdateUI() {
         bool loaded = m_audio.IsLoaded();
         bool hasItems = !m_playlist.IsEmpty();
@@ -1326,11 +1321,11 @@ private:
         InvalidateRect(m_playlistLV, NULL, TRUE);
     }
 
-    // ==========================================
+    
     // Hotkey bindings persistence
-    // ==========================================
+    
     // Hotkey bindings persistence (.hotkeys.txt) - ANSI
-    // ==========================================
+    
     void SaveHotkeyBindings() {
         std::wstring filePath = GetExeDirectory() + L"\\.hotkeys.txt";
         HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
@@ -1393,9 +1388,9 @@ private:
         CloseHandle(hFile);
     }
 
-    // ==========================================
+    
     // Settings persistence (.settings.txt)
-    // ==========================================
+    
     void SaveSettings() {
         SaveHotkeyBindings();
         std::wstring filePath = GetExeDirectory() + L"\\.settings.txt";
@@ -1442,9 +1437,9 @@ private:
         CloseHandle(hFile);
     }
 
-    // ==========================================
+    
     // Tray icon
-    // ==========================================
+    
     void AddTrayIcon() {
         if (m_trayIconAdded) return;
         NOTIFYICONDATAW nid = {};
@@ -1454,7 +1449,8 @@ private:
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         nid.uCallbackMessage = WM_APP_TRAY;
         nid.hIcon = LoadIconW(m_hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
-        wcscpy(nid.szTip, WINDOW_TITLE);
+        // Use current song info if available
+        BuildTrayTipText(nid.szTip, 128);
         Shell_NotifyIconW(NIM_ADD, &nid);
         m_trayIconAdded = true;
     }
@@ -1469,14 +1465,34 @@ private:
         m_trayIconAdded = false;
     }
 
-    void UpdateTrayTip(const std::wstring& text) {
+    void BuildTrayTipText(wchar_t* buf, int bufLen) {
+        if (m_currentIndex >= 0 && m_currentIndex < m_playlist.GetCount()) {
+            std::wstring meta = m_audio.GetFormattedMetadata();
+            std::wstring name;
+            if (!meta.empty())
+                name = meta;
+            else
+                name = GetDisplayName(m_playlist.GetFile(m_currentIndex));
+            if (m_audio.IsLoaded() && m_audio.IsPlaying())
+                swprintf(buf, bufLen, L"正在播放: %ls", name.c_str());
+            else if (m_audio.IsLoaded())
+                swprintf(buf, bufLen, L"已暂停: %ls", name.c_str());
+            else
+                wcsncpy(buf, WINDOW_TITLE, bufLen - 1);
+        } else {
+            wcsncpy(buf, WINDOW_TITLE, bufLen - 1);
+        }
+        buf[bufLen - 1] = L'\0';
+    }
+
+    void UpdateTrayTip() {
         if (!m_trayIconAdded) return;
         NOTIFYICONDATAW nid = {};
         nid.cbSize = sizeof(nid);
         nid.hWnd = m_hwnd;
         nid.uID = 1;
         nid.uFlags = NIF_TIP;
-        wcsncpy(nid.szTip, text.c_str(), 127);
+        BuildTrayTipText(nid.szTip, 128);
         Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 
@@ -1503,9 +1519,8 @@ private:
         }
     }
 
-    // ==========================================
+    
     // Last song progress
-    // ==========================================
     void SaveLastSong() {
         if (m_currentIndex < 0 || !m_audio.IsLoaded()) return;
         std::wstring filePath = GetExeDirectory() + L"\\.lastsong.txt";
@@ -1574,9 +1589,8 @@ private:
         return loaded;
     }
 
-    // ==========================================
+    
     // Playlist persistence
-    // ==========================================
     void SavePlaylist() {
         if (m_playlist.IsEmpty()) return;
         std::wstring filePath = GetExeDirectory() + L"\\.playlist.txt";
@@ -1593,12 +1607,13 @@ private:
         CloseHandle(hFile);
     }
 
-    void LoadPlaylist() {
+    bool LoadPlaylist() {
         std::wstring filePath = GetExeDirectory() + L"\\.playlist.txt";
         HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
             FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE) return;
+        if (hFile == INVALID_HANDLE_VALUE) return false;
         DWORD size = GetFileSize(hFile, NULL);
+        bool loaded = false;
         if (size > 2) {
             DWORD read = 0;
             std::wstring buf(size / 2 + 1, L'\0');
@@ -1618,17 +1633,18 @@ private:
                 }
                 p = nl ? nl + 1 : p + lineLen;
             }
+            loaded = !m_playlist.IsEmpty();
         }
         CloseHandle(hFile);
         RefreshPlaylistUI();
-        if (!m_playlist.IsEmpty())
+        if (loaded)
             SetWindowTextW(m_staticSong,
                 (L"已加载 " + std::to_wstring(m_playlist.GetCount()) + L" 首歌曲").c_str());
+        return loaded;
     }
 
-    // ==========================================
+    
     // Last folder persistence
-    // ==========================================
     void SaveLastFolder(const std::wstring& folderPath) {
         std::wstring filePath = GetExeDirectory() + L"\\.lastfolder.txt";
         HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
@@ -1676,9 +1692,7 @@ private:
         return loaded;
     }
 
-    // ==========================================
     // Volume persistence
-    // ==========================================
     void SaveVolume() {
         std::wstring filePath = GetExeDirectory() + L"\\.volume.txt";
         int vol = (int)SendMessageW(m_sliderVol, TBM_GETPOS, 0, 0);
@@ -1713,9 +1727,7 @@ private:
     }
 };
 
-// ==========================================
 // Hotkey dialog procedure
-// ==========================================
 static LRESULT CALLBACK HotkeyDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_CLOSE) { DestroyWindow(hDlg); return 0; }
     if (msg == WM_COMMAND) {
@@ -1742,9 +1754,7 @@ static LRESULT CALLBACK HotkeyDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProcW(hDlg, msg, wp, lp);
 }
 
-// ==========================================
 // WinMain
-// ==========================================
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     InitCommonControls();

@@ -1343,7 +1343,6 @@ private:
 
         DeleteObject(hBoldFont);
         DeleteObject(hGuiFont);
-        UnregisterClassW(STATS_CLASS, m_hInst);
     }
 
     void RefreshStatsDisplay(StatsDlgCtx* ctx) {

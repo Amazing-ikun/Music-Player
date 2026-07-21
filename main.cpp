@@ -1895,7 +1895,7 @@ private:
     }
 
     void HandleTrayMessage(WPARAM, LPARAM lp) {
-        if (LOWORD(lp) == WM_LBUTTONDBLCLK) {
+        if (LOWORD(lp) == WM_LBUTTONUP) {
             ShowWindow(m_hwnd, SW_RESTORE);
             SetForegroundWindow(m_hwnd);
         } else if (LOWORD(lp) == WM_RBUTTONDOWN) {

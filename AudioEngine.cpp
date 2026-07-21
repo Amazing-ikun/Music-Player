@@ -13,6 +13,10 @@ AudioEngine::AudioEngine()
     , m_speed(1.0)
     , m_notifyHwnd(NULL)
     , m_notifyMsg(0)
+    , m_fadeHwnd(NULL)
+    , m_fadeMsg(0)
+    , m_fading(false)
+    , m_fadeSync(0)
     , m_error(AudioError::Success)
 {
 }
@@ -55,6 +59,8 @@ bool AudioEngine::Load(const std::wstring& filePath) {
     Stop();
 
     // 释放前一个流（如果未被 AUTOFREE 自动释放）
+    m_fading = false;
+    m_fadeSync = 0;
     if (m_stream) {
         BASS_StreamFree(m_stream);
         m_stream = 0;
@@ -251,12 +257,39 @@ void AudioEngine::SetSpeed(double speed) {
     }
 }
 
+void AudioEngine::PauseFade(DWORD fadeMs) {
+    if (!m_stream || !m_playing || m_fading) return;
+    m_fading = true;
+    if (m_fadeSync) BASS_ChannelRemoveSync(m_stream, m_fadeSync);
+    m_fadeSync = BASS_ChannelSetSync(m_stream, BASS_SYNC_SLIDE, 0, FadeSyncProc, this);
+    BASS_ChannelSlideAttribute(m_stream, BASS_ATTRIB_VOL, 0, fadeMs);
+}
+
+void AudioEngine::PlayFade() {
+    if (!m_stream) return;
+    if (m_fading) {
+        m_fading = false;
+        if (m_fadeSync) {
+            BASS_ChannelRemoveSync(m_stream, m_fadeSync);
+            m_fadeSync = 0;
+        }
+    }
+    float vol = m_volume / 100.0f;
+    BASS_ChannelSetAttribute(m_stream, BASS_ATTRIB_VOL, 0);
+    BASS_ChannelPlay(m_stream, FALSE);
+    BASS_ChannelSlideAttribute(m_stream, BASS_ATTRIB_VOL, vol, 200);
+    m_playing = true;
+    m_paused = false;
+}
+
 // 通知：歌曲已播放结束（AUTOFREE已释放流）
 // 由主窗口在收到 WM_USER_SONG_END 时调用
 void AudioEngine::NotifyEndOfSong() {
     m_stream = 0;   // AUTOFREE 已释放
     m_playing = false;
     m_paused = false;
+    m_fading = false;
+    m_fadeSync = 0;
 }
 
 // 静态回调：BASS 播放结束同步
@@ -266,6 +299,22 @@ void CALLBACK AudioEngine::EndSyncProc(HSYNC /*handle*/, DWORD /*channel*/,
     AudioEngine* engine = static_cast<AudioEngine*>(user);
     if (engine && engine->m_notifyHwnd) {
         PostMessage(engine->m_notifyHwnd, engine->m_notifyMsg, 0, 0);
+    }
+}
+
+// 淡出同步：音量滑到 0 后暂停并恢复音量，通知主窗口
+void CALLBACK AudioEngine::FadeSyncProc(HSYNC, DWORD, DWORD, void* user) {
+    AudioEngine* engine = static_cast<AudioEngine*>(user);
+    if (!engine) return;
+    engine->m_fading = false;
+    engine->m_fadeSync = 0;
+    BASS_ChannelPause(engine->m_stream);
+    float vol = engine->m_volume / 100.0f;
+    BASS_ChannelSetAttribute(engine->m_stream, BASS_ATTRIB_VOL, vol);
+    engine->m_playing = false;
+    engine->m_paused = true;
+    if (engine->m_fadeHwnd) {
+        PostMessage(engine->m_fadeHwnd, engine->m_fadeMsg, 0, 0);
     }
 }
 

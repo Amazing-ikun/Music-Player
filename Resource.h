@@ -45,6 +45,7 @@
 // Custom Window Messages
 #define WM_USER_SONG_END    (WM_USER + 100)
 #define WM_APP_TRAY         (WM_USER + 101)
+#define WM_APP_FADE_DONE    (WM_USER + 102)
 
 // Timer IDs
 #define TIMER_ID_SEEK       3001

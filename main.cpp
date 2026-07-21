@@ -347,6 +347,7 @@ private:
             default:
                 if (msg == WM_USER_SONG_END) { OnSongEnd(); return 0; }
                 if (msg == WM_APP_TRAY) { HandleTrayMessage(wp, lp); return 0; }
+                if (msg == WM_APP_FADE_DONE) { OnFadeDone(); return 0; }
                 return DefWindowProcW(m_hwnd, msg, wp, lp);
         }
     }
@@ -394,6 +395,7 @@ private:
         LoadVolume();
         m_history.Load(GetExeDirectory() + L"\\.history.txt");
         m_audio.SetNotifyWindow(m_hwnd, WM_USER_SONG_END);
+        m_audio.SetFadeNotify(m_hwnd, WM_APP_FADE_DONE);
 
         if (m_settingsRememberProgress && !m_playlist.IsEmpty()) {
             if (LoadLastSong()) {
@@ -1090,13 +1092,12 @@ private:
     // Playback controls
     void OnPlayPause() {
         if (!m_audio.IsLoaded()) return;
-        if (m_audio.IsPlaying()) {
-            m_audio.Pause();
-            StopListening();
+        if (m_audio.IsPlaying() && !m_audio.IsFading()) {
+            m_audio.PauseFade(500);
             SetWindowTextW(m_staticSong, L"已暂停");
             UpdateTrayTip();
         } else {
-            m_audio.Play();
+            m_audio.PlayFade();
             StartListening();
             if (m_currentIndex >= 0 && m_currentIndex < m_playlist.GetCount()) {
                 std::wstring meta = m_audio.GetFormattedMetadata();
@@ -1147,6 +1148,10 @@ private:
         if (m_audio.GetPlayMode() == PlayMode::Shuffle && old != PlayMode::Shuffle)
             Reshuffle();
         UpdateModeUI();
+    }
+
+    void OnFadeDone() {
+        StopListening();
     }
 
     void SetPlayMode(PlayMode mode) {

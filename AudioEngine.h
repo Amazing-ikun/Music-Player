@@ -56,6 +56,12 @@ public:
     bool IsPaused() const { return m_paused; }
     bool IsLoaded() const { return m_stream != 0; }
 
+    // 淡入淡出 (变速不变调，通过音量滑动实现)
+    void PauseFade(DWORD fadeMs = 500);
+    void PlayFade();
+    bool IsFading() const { return m_fading; }
+    void SetFadeNotify(HWND hwnd, UINT msg) { m_fadeHwnd = hwnd; m_fadeMsg = msg; }
+
     // 音量 (0-100)
     void SetVolume(int volume);
     int GetVolume() const { return m_volume; }
@@ -90,6 +96,8 @@ public:
 private:
     // BASS 同步回调：歌曲播放结束
     static void CALLBACK EndSyncProc(HSYNC handle, DWORD channel, DWORD data, void* user);
+    // BASS 同步回调：淡出滑动完成
+    static void CALLBACK FadeSyncProc(HSYNC handle, DWORD channel, DWORD data, void* user);
 
     // 将BASS错误码映射为内部错误码
     static AudioError MapBassError(int bassCode);
@@ -102,6 +110,10 @@ private:
     PlayMode m_playMode;    // 当前播放模式
     double m_speed;         // 当前倍速 (1.0 = 正常)
     HWND    m_notifyHwnd;   // 通知窗口
+    HWND    m_fadeHwnd;     // 淡出通知窗口
+    UINT    m_fadeMsg;      // 淡出完成消息
+    bool    m_fading;       // 是否正在淡出
+    HSYNC   m_fadeSync;     // 淡出同步器句柄
     UINT    m_notifyMsg;    // 通知消息
     AudioError m_error;     // 最后一次操作的错误码
 };

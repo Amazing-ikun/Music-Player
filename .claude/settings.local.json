@@ -6,7 +6,9 @@
       "Bash(cmake --build .)",
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
-      "Bash(git reset *)"
+      "Bash(git reset *)",
+      "Bash(cmake --build . --config Debug)",
+      "Bash(python -c ' *)"
     ]
   }
 }

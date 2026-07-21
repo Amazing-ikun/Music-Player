@@ -44,6 +44,9 @@ public:
     // 通知：BASS已自动释放播放结束的流
     void NotifyEndOfSong();
 
+    // 淡出完成：由主窗口在 WM_APP_FADE_DONE 中调用（主线程）
+    void OnFadeComplete();
+
     // 文件加载/卸载
     bool Load(const std::wstring& filePath);
     void Unload();

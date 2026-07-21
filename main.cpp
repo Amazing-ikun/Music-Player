@@ -182,15 +182,26 @@ struct HKDlgCtx { HotkeyBinding* bindings; int recording; int count; MainWindow*
 
 static LRESULT CALLBACK HotkeyDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
 
+struct StatsDlgCtx;
+struct CalendarCtx {
+    StatsDlgCtx* statsCtx;
+};
 struct StatsDlgCtx {
     MainWindow* win;
     int rangeDays;
-    HWND hRadio7, hRadio30, hRadioCustom, hEditCustom;
+    int customValue;
+    bool useCalendarRange;
+    SYSTEMTIME calStart, calEnd;
+    HWND hRadio7, hRadio30, hRadioCustom;
+    HWND hDisplayCustom;
+    HWND hUpBtn, hDownBtn;
+    HWND hBtnCalendar;
     HWND hDayList, hWeekList, hPlayCountList, hTotalText;
     HWND hDlg;
 };
 static LRESULT CALLBACK StatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
 static LRESULT CALLBACK SpeedInputDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
+static LRESULT CALLBACK CalendarDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
 
 // MainWindow
 class MainWindow {
@@ -302,6 +313,7 @@ private:
     HFONT m_hFont;
 
     friend LRESULT CALLBACK StatsDlgProc(HWND, UINT, WPARAM, LPARAM);
+    friend LRESULT CALLBACK CalendarDlgProc(HWND, UINT, WPARAM, LPARAM);
 
     static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         MainWindow* win = (MainWindow*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
@@ -364,7 +376,7 @@ private:
     }
 
     void OnCreate() {
-        INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_WIN95_CLASSES };
+        INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_WIN95_CLASSES | ICC_DATE_CLASSES };
         InitCommonControlsEx(&icc);
         CreateMenuBar();
         CreateControls();
@@ -1151,6 +1163,7 @@ private:
     }
 
     void OnFadeDone() {
+        m_audio.OnFadeComplete();
         StopListening();
     }
 
@@ -1560,10 +1573,17 @@ private:
         StatsDlgCtx* ctx = new StatsDlgCtx();
         ctx->win = this;
         ctx->rangeDays = 30;
+        ctx->customValue = 2;
+        ctx->useCalendarRange = false;
+        memset(&ctx->calStart, 0, sizeof(SYSTEMTIME));
+        memset(&ctx->calEnd, 0, sizeof(SYSTEMTIME));
         ctx->hRadio7 = NULL;
         ctx->hRadio30 = NULL;
         ctx->hRadioCustom = NULL;
-        ctx->hEditCustom = NULL;
+        ctx->hDisplayCustom = NULL;
+        ctx->hUpBtn = NULL;
+        ctx->hDownBtn = NULL;
+        ctx->hBtnCalendar = NULL;
         ctx->hDayList = NULL;
         ctx->hWeekList = NULL;
         ctx->hTotalText = NULL;
@@ -1599,18 +1619,33 @@ private:
             190, yPos, 65, 22, hDlg, (HMENU)302, m_hInst, NULL);
         SendMessageW(ctx->hRadioCustom, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
 
-        ctx->hEditCustom = CreateWindowExW(0, L"EDIT", L"2",
-            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_CENTER | ES_NUMBER,
-            265, yPos, 44, 26, hDlg, (HMENU)303, m_hInst, NULL);
-        SendMessageW(ctx->hEditCustom, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
-        SendMessageW(ctx->hEditCustom, EM_SETLIMITTEXT, 3, 0);
+        // Slot-machine style: up ▲ / number display / down ▼
+        ctx->hUpBtn = CreateWindowExW(0, L"BUTTON", L"▲",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            265, yPos - 14, 44, 18, hDlg, (HMENU)306, m_hInst, NULL);
+        SendMessageW(ctx->hUpBtn, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
+
+        ctx->hDisplayCustom = CreateWindowExW(0, L"STATIC", L"2",
+            WS_CHILD | WS_VISIBLE | WS_BORDER | SS_CENTER | SS_SUNKEN,
+            265, yPos + 3, 44, 24, hDlg, NULL, m_hInst, NULL);
+        SendMessageW(ctx->hDisplayCustom, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
+
+        ctx->hDownBtn = CreateWindowExW(0, L"BUTTON", L"▼",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            265, yPos + 25, 44, 18, hDlg, (HMENU)307, m_hInst, NULL);
+        SendMessageW(ctx->hDownBtn, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
 
         CreateWindowExW(0, L"STATIC", L"×30天",
-            WS_CHILD | WS_VISIBLE, 308, yPos + 3, 50, 20, hDlg, NULL, m_hInst, NULL);
+            WS_CHILD | WS_VISIBLE, 310, yPos + 8, 50, 20, hDlg, NULL, m_hInst, NULL);
+
+        ctx->hBtnCalendar = CreateWindowExW(0, L"BUTTON", L"选择...",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            365, yPos - 2, 60, 26, hDlg, (HMENU)308, m_hInst, NULL);
+        SendMessageW(ctx->hBtnCalendar, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
 
         CreateWindowExW(0, L"BUTTON", L"刷新",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            380, yPos - 2, 70, 26, hDlg, (HMENU)304, m_hInst, NULL);
+            435, yPos - 2, 70, 26, hDlg, (HMENU)304, m_hInst, NULL);
 
         yPos += 34;
 
@@ -1684,18 +1719,24 @@ private:
     void RefreshStatsDisplay(StatsDlgCtx* ctx) {
         time_t now_t = time(NULL);
         struct tm tm_now = *localtime(&now_t);
-        tm_now.tm_mday -= ctx->rangeDays;
-        tm_now.tm_isdst = -1;
-        mktime(&tm_now);
-        char fromBuf[32];
-        snprintf(fromBuf, sizeof(fromBuf), "%04d-%02d-%02d",
-                 tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
-        std::string fromDate(fromBuf);
+        char fromBuf[32], toBuf[32];
+        if (ctx->useCalendarRange) {
+            snprintf(fromBuf, sizeof(fromBuf), "%04d-%02d-%02d",
+                     ctx->calStart.wYear, ctx->calStart.wMonth, ctx->calStart.wDay);
+            snprintf(toBuf, sizeof(toBuf), "%04d-%02d-%02d",
+                     ctx->calEnd.wYear, ctx->calEnd.wMonth, ctx->calEnd.wDay);
+        } else {
+            tm_now.tm_mday -= ctx->rangeDays;
+            tm_now.tm_isdst = -1;
+            mktime(&tm_now);
+            snprintf(fromBuf, sizeof(fromBuf), "%04d-%02d-%02d",
+                     tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
 
-        struct tm tm_today = *localtime(&now_t);
-        char toBuf[32];
-        snprintf(toBuf, sizeof(toBuf), "%04d-%02d-%02d",
-                 tm_today.tm_year + 1900, tm_today.tm_mon + 1, tm_today.tm_mday);
+            struct tm tm_today = *localtime(&now_t);
+            snprintf(toBuf, sizeof(toBuf), "%04d-%02d-%02d",
+                     tm_today.tm_year + 1900, tm_today.tm_mon + 1, tm_today.tm_mday);
+        }
+        std::string fromDate(fromBuf);
         std::string toDate(toBuf);
 
         auto daily = m_history.GetDailyRecords(fromDate, toDate);
@@ -2506,38 +2547,179 @@ static LRESULT CALLBACK StatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) 
             else if (SendMessageW(c->hRadio30, BM_GETCHECK, 0, 0) == BST_CHECKED)
                 c->rangeDays = 30;
             else {
-                wchar_t buf[16];
-                GetWindowTextW(c->hEditCustom, buf, 16);
-                int n = _wtoi(buf);
-                if (n < 1) n = 1;
-                c->rangeDays = n * 30;
+                if (c->customValue < 1) c->customValue = 1;
+                c->rangeDays = c->customValue * 30;
             }
             c->win->RefreshStatsDisplay(c);
             return 0;
         }
 
         if (id == 300) { // Radio 7
+            c->useCalendarRange = false;
             c->rangeDays = 7;
             c->win->RefreshStatsDisplay(c);
             return 0;
         }
         if (id == 301) { // Radio 30
+            c->useCalendarRange = false;
             c->rangeDays = 30;
             c->win->RefreshStatsDisplay(c);
             return 0;
         }
         if (id == 302) { // Radio Custom
-            wchar_t buf[16];
-            GetWindowTextW(c->hEditCustom, buf, 16);
-            int n = _wtoi(buf);
-            if (n < 1) n = 1;
-            c->rangeDays = n * 30;
-            c->win->RefreshStatsDisplay(c);
+            if (c->useCalendarRange) {
+                c->win->RefreshStatsDisplay(c);
+            } else {
+                if (c->customValue < 1) c->customValue = 1;
+                c->rangeDays = c->customValue * 30;
+                c->win->RefreshStatsDisplay(c);
+            }
+            return 0;
+        }
+
+        if (id == 306) { // Up arrow
+            c->useCalendarRange = false;
+            c->customValue++;
+            if (c->customValue > 999) c->customValue = 999;
+            {
+                wchar_t buf[8];
+                swprintf(buf, 8, L"%d", c->customValue);
+                SetWindowTextW(c->hDisplayCustom, buf);
+            }
+            if (SendMessageW(c->hRadioCustom, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+                c->rangeDays = c->customValue * 30;
+                c->win->RefreshStatsDisplay(c);
+            }
+            return 0;
+        }
+        if (id == 307) { // Down arrow
+            c->useCalendarRange = false;
+            c->customValue--;
+            if (c->customValue < 1) c->customValue = 1;
+            {
+                wchar_t buf[8];
+                swprintf(buf, 8, L"%d", c->customValue);
+                SetWindowTextW(c->hDisplayCustom, buf);
+            }
+            if (SendMessageW(c->hRadioCustom, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+                c->rangeDays = c->customValue * 30;
+                c->win->RefreshStatsDisplay(c);
+            }
+            return 0;
+        }
+
+        if (id == 308) { // Calendar date range picker
+            static bool calClass = false;
+            if (!calClass) {
+                calClass = true;
+                WNDCLASSEXW cwc = {};
+                cwc.cbSize        = sizeof(cwc);
+                cwc.style         = CS_HREDRAW | CS_VREDRAW;
+                cwc.lpfnWndProc   = CalendarDlgProc;
+                cwc.hInstance     = GetModuleHandleW(NULL);
+                cwc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+                cwc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+                cwc.lpszClassName = L"CalendarWindow";
+                RegisterClassExW(&cwc);
+            }
+
+            CalendarCtx* calCtx = new CalendarCtx();
+            calCtx->statsCtx = c;
+            SYSTEMTIME today;
+            GetLocalTime(&today);
+
+            int cw = 260, ch = 270;
+            RECT cr;
+            GetWindowRect(hDlg, &cr);
+            int cx = cr.left + (cr.right - cr.left - cw) / 2;
+            int cy = cr.top + (cr.bottom - cr.top - ch) / 2;
+
+            EnableWindow(hDlg, FALSE);
+            HWND hCalDlg = CreateWindowExW(WS_EX_DLGMODALFRAME,
+                L"CalendarWindow", L"选择日期范围",
+                WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+                cx, cy, cw, ch, hDlg, NULL, GetModuleHandleW(NULL), calCtx);
+            if (hCalDlg) {
+                HWND hCal = CreateWindowExW(0, MONTHCAL_CLASSW, NULL,
+                    WS_CHILD | WS_VISIBLE | MCS_MULTISELECT,
+                    10, 10, 230, 180, hCalDlg, NULL, GetModuleHandleW(NULL), NULL);
+                SendMessageW(hCal, MCM_SETMAXSELCOUNT, 3650, 0);
+                SendMessageW(hCal, MCM_SETTODAY, 0, (LPARAM)&today);
+                SYSTEMTIME initRange[2] = { today, today };
+                initRange[1].wDay++;
+                SendMessageW(hCal, MCM_SETSELRANGE, 0, (LPARAM)initRange);
+
+                CreateWindowExW(0, L"BUTTON", L"确定",
+                    WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                    55, 200, 70, 26, hCalDlg, (HMENU)1, GetModuleHandleW(NULL), NULL);
+                CreateWindowExW(0, L"BUTTON", L"取消",
+                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    135, 200, 70, 26, hCalDlg, (HMENU)2, GetModuleHandleW(NULL), NULL);
+            } else {
+                delete calCtx;
+                EnableWindow(hDlg, TRUE);
+                SetForegroundWindow(hDlg);
+            }
             return 0;
         }
         if (id == 305) { // Export button
             ExportStatsToJson(c);
             MessageBoxW(hDlg, L"统计数据已导出到 .stats_export.json", L"导出成功", MB_OK);
+            return 0;
+        }
+        return 0;
+    }
+    return DefWindowProcW(hDlg, msg, wp, lp);
+}
+
+
+// Calendar dialog proc: month calendar range picker
+static LRESULT CALLBACK CalendarDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_CLOSE) {
+        CalendarCtx* ctx = (CalendarCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
+        if (ctx) { delete ctx; SetWindowLongPtrW(hDlg, GWLP_USERDATA, 0); }
+        HWND hParent = GetParent(hDlg);
+        EnableWindow(hParent, TRUE);
+        SetForegroundWindow(hParent);
+        DestroyWindow(hDlg);
+        return 0;
+    }
+    if (msg == WM_DESTROY) {
+        CalendarCtx* ctx = (CalendarCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
+        HWND hParent = GetParent(hDlg);
+        EnableWindow(hParent, TRUE);
+        SetForegroundWindow(hParent);
+        return 0;
+    }
+    if (msg == WM_COMMAND) {
+        int id = LOWORD(wp);
+        if (id == 2) { // Cancel
+            CalendarCtx* ctx = (CalendarCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
+            if (ctx) { delete ctx; SetWindowLongPtrW(hDlg, GWLP_USERDATA, 0); }
+            DestroyWindow(hDlg);
+            return 0;
+        }
+        if (id == 1) { // OK
+            CalendarCtx* ctx = (CalendarCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
+            if (ctx) {
+                StatsDlgCtx* sctx = ctx->statsCtx;
+                HWND hCal = FindWindowExW(hDlg, NULL, MONTHCAL_CLASSW, NULL);
+                if (hCal) {
+                    SYSTEMTIME range[2];
+                    SendMessageW(hCal, MCM_GETSELRANGE, 0, (LPARAM)range);
+                    sctx->calStart = range[0];
+                    sctx->calEnd = range[1];
+                    sctx->useCalendarRange = true;
+                    // Switch to custom radio to reflect custom range
+                    SendMessageW(sctx->hRadio7, BM_SETCHECK, BST_UNCHECKED, 0);
+                    SendMessageW(sctx->hRadio30, BM_SETCHECK, BST_UNCHECKED, 0);
+                    SendMessageW(sctx->hRadioCustom, BM_SETCHECK, BST_CHECKED, 0);
+                    sctx->win->RefreshStatsDisplay(sctx);
+                }
+            }
+            delete ctx;
+            SetWindowLongPtrW(hDlg, GWLP_USERDATA, 0);
+            DestroyWindow(hDlg);
             return 0;
         }
         return 0;
@@ -2578,6 +2760,19 @@ static LRESULT CALLBACK SpeedInputDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM
 
 // WinMain
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
+    // Single-instance check: a named mutex ensures only one process runs.
+    const wchar_t MUTEX_NAME[] = L"Local\\MusicPlayer_SingleInstance";
+    HANDLE hMutex = CreateMutexW(NULL, FALSE, MUTEX_NAME);
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND hWnd = FindWindowW(CLASS_NAME, NULL);
+        if (hWnd) {
+            if (IsIconic(hWnd)) ShowWindow(hWnd, SW_RESTORE);
+            SetForegroundWindow(hWnd);
+        }
+        CloseHandle(hMutex);
+        return 0;
+    }
+
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     InitCommonControls();
 

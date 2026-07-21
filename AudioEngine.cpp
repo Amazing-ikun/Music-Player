@@ -302,20 +302,27 @@ void CALLBACK AudioEngine::EndSyncProc(HSYNC /*handle*/, DWORD /*channel*/,
     }
 }
 
-// 淡出同步：音量滑到 0 后暂停并恢复音量，通知主窗口
+// 淡出同步：音量滑到 0 后通知主线程执行暂停操作
+// 注意：BASS 同步回调中禁止调用 BASS API，仅做 PostMessage
 void CALLBACK AudioEngine::FadeSyncProc(HSYNC, DWORD, DWORD, void* user) {
     AudioEngine* engine = static_cast<AudioEngine*>(user);
     if (!engine) return;
-    engine->m_fading = false;
-    engine->m_fadeSync = 0;
-    BASS_ChannelPause(engine->m_stream);
-    float vol = engine->m_volume / 100.0f;
-    BASS_ChannelSetAttribute(engine->m_stream, BASS_ATTRIB_VOL, vol);
-    engine->m_playing = false;
-    engine->m_paused = true;
     if (engine->m_fadeHwnd) {
         PostMessage(engine->m_fadeHwnd, engine->m_fadeMsg, 0, 0);
     }
+}
+
+// 在主线程中处理淡出完成（由 WM_APP_FADE_DONE 触发）
+void AudioEngine::OnFadeComplete() {
+    if (!m_fading || !m_fadeSync) return; // 已被 PlayFade() 取消
+    m_fading = false;
+    m_fadeSync = 0;
+    if (!m_stream) return;
+    BASS_ChannelPause(m_stream);
+    float vol = m_volume / 100.0f;
+    BASS_ChannelSetAttribute(m_stream, BASS_ATTRIB_VOL, vol);
+    m_playing = false;
+    m_paused = true;
 }
 
 AudioError AudioEngine::MapBassError(int bassCode) {

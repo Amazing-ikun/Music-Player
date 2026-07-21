@@ -38,6 +38,8 @@ set(SOURCES
     AudioEngine.cpp
     PlaylistManager.h
     PlaylistManager.cpp
+    ListeningHistory.h
+    ListeningHistory.cpp
     app.rc
 )
 

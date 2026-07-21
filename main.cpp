@@ -1246,7 +1246,7 @@ private:
 
         HFONT hGuiFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"微软雅黑");
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, NULL);
 
         int rowY = 20;
         for (int i = 0; i < m_hotkeyCount; i++) {
@@ -1377,10 +1377,10 @@ private:
 
         HFONT hGuiFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"微软雅黑");
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, NULL);
         HFONT hBoldFont = CreateFontW(-13, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"微软雅黑");
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, NULL);
 
         int yPos = 15;
 

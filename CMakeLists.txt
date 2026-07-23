@@ -60,6 +60,7 @@ target_link_libraries(MusicPlayer
     shell32.lib
     user32.lib
     gdi32.lib
+    oleaut32.lib
 )
 
 # Copy BASS DLLs to output directory
@@ -74,4 +75,10 @@ add_custom_command(TARGET MusicPlayer POST_BUILD
     "${BASS_LIB_DIR}/bass_fx.dll"
     "$<TARGET_FILE_DIR:MusicPlayer>"
     COMMENT "Copying bass_fx.dll to output directory..."
+)
+add_custom_command(TARGET MusicPlayer POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${BASS_LIB_DIR}/bassflac.dll"
+    "$<TARGET_FILE_DIR:MusicPlayer>"
+    COMMENT "Copying bassflac.dll to output directory..."
 )

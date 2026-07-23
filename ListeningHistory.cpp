@@ -17,10 +17,24 @@ static int DaysInMonth(int y, int m) {
     return d[m - 1];
 }
 
+// Parse "YYYY-MM-DD" using strtol. Returns false on parse failure.
+static bool ParseDate(const std::string& s, int& y, int& m, int& d) {
+    const char* p = s.c_str();
+    char* end = nullptr;
+    y = static_cast<int>(strtol(p, &end, 10));
+    if (end == p || *end != '-') return false;
+    p = end + 1;
+    m = static_cast<int>(strtol(p, &end, 10));
+    if (end == p || *end != '-') return false;
+    p = end + 1;
+    d = static_cast<int>(strtol(p, &end, 10));
+    return end != p;
+}
+
 // Convert YYYY-MM-DD to days since epoch (for date arithmetic)
 static int DateToDays(const std::string& date) {
-    int y, m, d;
-    sscanf(date.c_str(), "%d-%d-%d", &y, &m, &d);
+    int y = 1970, m = 1, d = 1;
+    ParseDate(date, y, m, d);
     int total = 0;
     for (int Y = 1970; Y < y; Y++)
         total += IsLeap(Y) ? 366 : 365;
@@ -242,7 +256,8 @@ std::string ListeningHistory::DateToKey(int year, int month, int day) {
 }
 
 void ListeningHistory::KeyToDate(const std::string& key, int& year, int& month, int& day) {
-    sscanf(key.c_str(), "%d-%d-%d", &year, &month, &day);
+    year = 1970; month = 1; day = 1;
+    ParseDate(key, year, month, day);
 }
 
 std::wstring ListeningHistory::GetWeekday(int year, int month, int day) {
@@ -269,8 +284,8 @@ int ListeningHistory::GetISOWeek(int year, int month, int day) {
 }
 
 std::string ListeningHistory::GetMonday(const std::string& date) {
-    int y, m, d;
-    sscanf(date.c_str(), "%d-%d-%d", &y, &m, &d);
+    int y = 1970, m = 1, d = 1;
+    ParseDate(date, y, m, d);
     struct tm t = {};
     t.tm_year = y - 1900;
     t.tm_mon = m - 1;

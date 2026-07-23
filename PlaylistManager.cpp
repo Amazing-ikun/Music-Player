@@ -112,6 +112,17 @@ void PlaylistManager::Clear() {
     m_songs.clear();
 }
 
+void PlaylistManager::RemoveAt(int index) {
+    if (index >= 0 && index < (int)m_songs.size())
+        m_songs.erase(m_songs.begin() + index);
+}
+
+void PlaylistManager::InsertAt(int index, const SongInfo& song) {
+    if (index < 0) index = 0;
+    if (index > (int)m_songs.size()) index = (int)m_songs.size();
+    m_songs.insert(m_songs.begin() + index, song);
+}
+
 const std::wstring& PlaylistManager::GetFile(int index) const {
     static const std::wstring empty;
     if (index < 0 || index >= (int)m_songs.size()) return empty;

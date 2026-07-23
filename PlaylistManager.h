@@ -19,6 +19,8 @@ public:
     void ScanFolder(const std::wstring& folderPath);
     void AddFile(const std::wstring& filePath);
     void Clear();
+    void RemoveAt(int index);
+    void InsertAt(int index, const SongInfo& song);
 
     int  GetCount() const { return (int)m_songs.size(); }
     bool IsEmpty() const { return m_songs.empty(); }

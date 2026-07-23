@@ -174,6 +174,26 @@ static bool CodeToBinding(const std::wstring& code, int& vk, int& mod) {
     return vk != 0;
 }
 
+// Pure search logic: check if song text fields match a query
+static bool SearchMatchesText(const std::wstring& query,
+                               const std::wstring& title,
+                               const std::wstring& artist,
+                               const std::wstring& album) {
+    if (title.empty() && artist.empty() && album.empty())
+        return true;
+    if (query.empty()) return true;
+
+    std::wstring q = query;
+    for (auto& c : q) c = towlower(c);
+
+    auto contains = [&](const std::wstring& s) -> bool {
+        std::wstring ls = s;
+        for (auto& c : ls) c = towlower(c);
+        return ls.find(q) != std::wstring::npos;
+    };
+    return contains(title) || contains(artist) || contains(album);
+}
+
 // Forward declaration
 class MainWindow;
 
@@ -183,25 +203,25 @@ struct HKDlgCtx { HotkeyBinding* bindings; int recording; int count; MainWindow*
 static LRESULT CALLBACK HotkeyDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
 
 struct StatsDlgCtx;
-struct CalendarCtx {
-    StatsDlgCtx* statsCtx;
-};
 struct StatsDlgCtx {
     MainWindow* win;
     int rangeDays;
-    int customValue;
     bool useCalendarRange;
     SYSTEMTIME calStart, calEnd;
+
+    int baseW, baseH;
+    int yDayList, yWeekList, yPlayList, yTotal, yButtons;
+    int hDay, hWeek, hPlay;
+
     HWND hRadio7, hRadio30, hRadioCustom;
-    HWND hDisplayCustom;
-    HWND hUpBtn, hDownBtn;
-    HWND hBtnCalendar;
+    HWND hDtpStart, hDtpEnd;
     HWND hDayList, hWeekList, hPlayCountList, hTotalText;
     HWND hDlg;
+    bool dtpGuard; // guard against re-entrancy from DTM_SETSYSTEMTIME
 };
 static LRESULT CALLBACK StatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
 static LRESULT CALLBACK SpeedInputDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
-static LRESULT CALLBACK CalendarDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
+static void LayoutStatsControls(StatsDlgCtx* c, int clientW, int clientH);
 
 // MainWindow
 class MainWindow {
@@ -209,16 +229,17 @@ public:
     MainWindow()
         : m_hwnd(NULL), m_hInst(NULL)
         , m_playlistLV(NULL), m_searchEdit(NULL)
-        , m_btnPrev(NULL), m_btnPlay(NULL), m_btnNext(NULL), m_btnMode(NULL)
+        , m_btnPrev(NULL), m_btnPlay(NULL), m_btnNext(NULL), m_btnMode(NULL), m_btnLocate(NULL)
         , m_trackSeek(NULL), m_sliderVol(NULL), m_staticVolPct(NULL)
         , m_staticTime(NULL), m_staticSong(NULL)
         , m_currentIndex(-1), m_userDraggingSeek(false)
         , m_sortColumn(-1), m_sortAscending(true)
         , m_shufflePos(0)
-        , m_settingsAutoplay(true), m_settingsRememberProgress(true)
+        , m_settingsAutoplay(1), m_settingsRememberProgress(true)
         , m_settingsTray(true), m_trayIconAdded(false)
         , m_ctrlPanel(NULL)
-        , m_listening(false), m_saveTick(0)
+        , m_listening(false), m_saveTick(0), m_nextScheduled(-1)
+        , m_undoValid(false)
     {
         srand((unsigned)time(NULL));
         InitDefaultHotkeys();
@@ -232,11 +253,19 @@ public:
         wc.style         = CS_HREDRAW | CS_VREDRAW;
         wc.lpfnWndProc   = StaticWndProc;
         wc.hInstance     = hInst;
-        wc.hIcon         = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
+        wc.hIcon         = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON),
+                                              IMAGE_ICON,
+                                              GetSystemMetrics(SM_CXICON),
+                                              GetSystemMetrics(SM_CYICON),
+                                              LR_DEFAULTCOLOR);
         wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
         wc.lpszClassName = CLASS_NAME;
-        wc.hIconSm       = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
+        wc.hIconSm       = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON),
+                                              IMAGE_ICON,
+                                              GetSystemMetrics(SM_CXSMICON),
+                                              GetSystemMetrics(SM_CYSMICON),
+                                              LR_DEFAULTCOLOR);
 
         if (!RegisterClassExW(&wc)) return false;
 
@@ -268,7 +297,7 @@ private:
     HINSTANCE m_hInst;
     HWND m_playlistLV;
     HWND m_searchEdit;
-    HWND m_btnPrev, m_btnPlay, m_btnNext, m_btnMode;
+    HWND m_btnPrev, m_btnPlay, m_btnNext, m_btnMode, m_btnLocate;
     HWND m_trackSeek, m_sliderVol, m_staticVolPct;
     HWND m_staticTime, m_staticSong;
     HWND m_ctrlPanel;
@@ -287,7 +316,7 @@ private:
     int              m_shufflePos;
 
     // ---- Settings ----
-    bool m_settingsAutoplay;
+    int m_settingsAutoplay;  // 0=不进行操作, 1=自动播放
     bool m_settingsRememberProgress;
     bool m_settingsTray;
     bool m_trayIconAdded;
@@ -300,20 +329,26 @@ private:
     HMENU m_settingsMenu;
     HMENU m_playSubMenu;
     HMENU m_speedSubMenu;
+    HMENU m_startupSubMenu;
 
     // ---- Listening history ----
     ListeningHistory m_history;
     bool m_listening;
     std::chrono::steady_clock::time_point m_listenStart;
     int m_saveTick;
+    int m_nextScheduled;  // index to play after current song ends, -1 = none
 
     // ---- Play count tracking ----
     std::map<std::wstring, int> m_playCount;
 
+    // ---- Undo remove ----
+    SongInfo m_undoSong;
+    int m_undoIndex;
+    bool m_undoValid;
+
     HFONT m_hFont;
 
     friend LRESULT CALLBACK StatsDlgProc(HWND, UINT, WPARAM, LPARAM);
-    friend LRESULT CALLBACK CalendarDlgProc(HWND, UINT, WPARAM, LPARAM);
 
     static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         MainWindow* win = (MainWindow*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
@@ -360,6 +395,10 @@ private:
                 if (msg == WM_USER_SONG_END) { OnSongEnd(); return 0; }
                 if (msg == WM_APP_TRAY) { HandleTrayMessage(wp, lp); return 0; }
                 if (msg == WM_APP_FADE_DONE) { OnFadeDone(); return 0; }
+                if (msg == WM_APP_BRING_TO_TOP) {
+                    SetForegroundWindow(m_hwnd);
+                    return 0;
+                }
                 return DefWindowProcW(m_hwnd, msg, wp, lp);
         }
     }
@@ -398,6 +437,7 @@ private:
         UpdateSettingsMenu();
         UpdateModeUI();
         UpdateSpeedMenu();
+        UpdateUndoMenuState();
 
         if (!LoadPlaylist()) {
             WriteLog(L"播放列表文件不存在或为空，尝试加载上次打开的文件夹");
@@ -409,12 +449,44 @@ private:
         m_audio.SetNotifyWindow(m_hwnd, WM_USER_SONG_END);
         m_audio.SetFadeNotify(m_hwnd, WM_APP_FADE_DONE);
 
+        bool startPlay = (m_settingsAutoplay == 1);
         if (m_settingsRememberProgress && !m_playlist.IsEmpty()) {
             if (LoadLastSong()) {
-            } else if (m_settingsAutoplay && !m_playlist.IsEmpty()) {
+                // Stream loaded and seeked, now start playback if configured.
+                if (startPlay) {
+                    m_audio.Play();
+                    StartListening();
+                    if (m_currentIndex >= 0) {
+                        const std::wstring& path = m_playlist.GetFile(m_currentIndex);
+                        std::wstring meta = m_audio.GetFormattedMetadata();
+                        std::wstring text;
+                        if (!meta.empty())
+                            text = L"正在播放: " + meta;
+                        else
+                            text = L"正在播放: " + GetDisplayName(path);
+                        double speed = m_audio.GetSpeed();
+                        if (speed != 1.0) {
+                            wchar_t sb[16];
+                            swprintf(sb, 16, L" (%.2gx)", speed);
+                            text += sb;
+                        }
+                        SetWindowTextW(m_staticSong, text.c_str());
+                    }
+                    UpdateUI();
+                    UpdatePlaylistSelection();
+                    UpdateTrayTip();
+                    SetTimer(m_hwnd, TIMER_ID_SEEK, 500, NULL);
+                    m_saveTick = 0;
+                } else {
+                    UpdateUI();
+                    UpdatePlaylistSelection();
+                    SetWindowTextW(m_staticSong, L"已暂停");
+                    UpdateTrayTip();
+                }
+            } else if (startPlay) {
                 PlayFile(0);
             }
-        } else if (m_settingsAutoplay && !m_playlist.IsEmpty()) {
+        } else if (startPlay) {
             PlayFile(0);
         }
 
@@ -454,12 +526,16 @@ private:
         AppendMenuW(fileMenu, MF_STRING, ID_FILE_ADDFILES, L"添加歌曲(&A)...");
         AppendMenuW(fileMenu, MF_STRING, ID_FILE_EXPORT_PLAYLIST, L"导出歌单(&E)...");
         AppendMenuW(fileMenu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(fileMenu, MF_STRING | MF_GRAYED, ID_UNDO_REMOVE, L"撤销移除(&U)");
+        AppendMenuW(fileMenu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(fileMenu, MF_STRING, ID_FILE_EXIT, L"退出(&X)");
         AppendMenuW(bar, MF_POPUP, (UINT_PTR)fileMenu, L"文件(&F)");
 
         m_settingsMenu = CreatePopupMenu();
-        AppendMenuW(m_settingsMenu, MF_STRING | MF_CHECKED, ID_SETTINGS_AUTOPLAY,
-            L"启动后自动播放");
+        m_startupSubMenu = CreatePopupMenu();
+        AppendMenuW(m_startupSubMenu, MF_STRING, ID_STARTUP_NOTHING, L"不进行操作");
+        AppendMenuW(m_startupSubMenu, MF_STRING | MF_CHECKED, ID_STARTUP_AUTOPLAY, L"自动播放");
+        AppendMenuW(m_settingsMenu, MF_POPUP, (UINT_PTR)m_startupSubMenu, L"启动后...");
         AppendMenuW(m_settingsMenu, MF_STRING | MF_CHECKED, ID_SETTINGS_REMEMBER,
             L"记住播放进度");
         AppendMenuW(m_settingsMenu, MF_STRING | MF_CHECKED, ID_SETTINGS_TRAY,
@@ -545,6 +621,10 @@ private:
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             0, 0, 0, 0, m_hwnd, (HMENU)IDC_BTN_NEXT, m_hInst, NULL);
 
+        m_btnLocate = CreateWindowExW(0, L"BUTTON", L"📍",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            0, 0, 0, 0, m_hwnd, (HMENU)IDC_BTN_LOCATE, m_hInst, NULL);
+
         m_staticVolPct = CreateWindowExW(0, L"STATIC", L"80%",
             WS_CHILD | WS_VISIBLE | SS_CENTER,
             0, 0, 0, 0, m_hwnd, (HMENU)IDC_STAT_VOL, m_hInst, NULL);
@@ -570,7 +650,7 @@ private:
             WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
             0, 0, 0, 0, m_hwnd, (HMENU)IDC_STAT_SONG, m_hInst, NULL);
 
-        HWND ctls[] = { m_btnMode, m_btnPrev, m_btnPlay, m_btnNext,
+        HWND ctls[] = { m_btnMode, m_btnPrev, m_btnPlay, m_btnNext, m_btnLocate,
                         m_sliderVol, m_trackSeek, m_staticVolPct,
                         m_staticTime, m_staticSong };
         for (auto c : ctls) SendMessageW(c, WM_SETFONT, (WPARAM)m_hFont, TRUE);
@@ -619,6 +699,8 @@ private:
         SetWindowPos(m_btnPlay, NULL, bx, y + 4, 36, BH, SWP_NOZORDER);
         bx += 42;
         SetWindowPos(m_btnNext, NULL, bx, y + 4, 36, BH, SWP_NOZORDER);
+        bx += 42;
+        SetWindowPos(m_btnLocate, NULL, bx, y + 4, 36, BH, SWP_NOZORDER);
 
         int volPctW = 36;
         int volW = 130;
@@ -666,10 +748,17 @@ private:
                 case ID_FILE_OPENFOLDER:      OpenFolder(); break;
                 case ID_FILE_ADDFILES:        AddFiles();   break;
                 case ID_FILE_EXPORT_PLAYLIST: ExportPlaylist(); break;
+                case ID_UNDO_REMOVE:          UndoRemove();     break;
                 case ID_FILE_EXIT:            OnRealClose(); break;
-                case ID_SETTINGS_AUTOPLAY:
-                    m_settingsAutoplay = !m_settingsAutoplay;
+                case ID_STARTUP_NOTHING:
+                    m_settingsAutoplay = 0;
                     UpdateSettingsMenu();
+                    SaveSettings();
+                    break;
+                case ID_STARTUP_AUTOPLAY:
+                    m_settingsAutoplay = 1;
+                    UpdateSettingsMenu();
+                    SaveSettings();
                     break;
                 case ID_SETTINGS_REMEMBER:
                     m_settingsRememberProgress = !m_settingsRememberProgress;
@@ -722,6 +811,7 @@ private:
                 else if (hCtrl == m_btnPrev) OnPrev();
                 else if (hCtrl == m_btnNext) OnNext();
                 else if (hCtrl == m_btnMode) OnCycleMode();
+                else if (hCtrl == m_btnLocate) LocateCurrentSong();
             } else if (code == EN_CHANGE && hCtrl == m_searchEdit) {
                 OnSearchChanged();
             }
@@ -786,6 +876,132 @@ private:
                     LPNMITEMACTIVATE ia = (LPNMITEMACTIVATE)lp;
                     if (ia->iItem >= 0 && ia->iItem < (int)m_filterMap.size()) {
                         PlayFile(m_filterMap[ia->iItem]);
+                    }
+                    return 0;
+                }
+                case NM_RCLICK: {
+                    LPNMITEMACTIVATE ia = (LPNMITEMACTIVATE)lp;
+                    int row = ia->iItem;
+                    if (row < 0 || row >= (int)m_filterMap.size()) return 0;
+                    int songIdx = m_filterMap[row];
+
+                    ListView_SetItemState(m_playlistLV, row,
+                        LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+
+                    POINT pt;
+                    GetCursorPos(&pt);
+
+                    const std::wstring& path = m_playlist.GetFile(songIdx);
+
+                    HMENU hMenu = CreatePopupMenu();
+                    HMENU hSpeedMenu = CreatePopupMenu();
+
+                    AppendMenuW(hMenu, MF_STRING, 3101, L"播放(&P)");
+                    AppendMenuW(hMenu, MF_STRING, 3102, L"下一首播放(&N)");
+                    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+
+                    // Speed submenu
+                    double curSpeed = m_audio.GetSpeed();
+                    struct { int id; const wchar_t* label; double val; } speedItems[] = {
+                        { ID_SPEED_025, L"0.25x", 0.25 },
+                        { ID_SPEED_050, L"0.5x", 0.5 },
+                        { ID_SPEED_075, L"0.75x", 0.75 },
+                        { ID_SPEED_100, L"1x", 1.0 },
+                        { ID_SPEED_125, L"1.25x", 1.25 },
+                        { ID_SPEED_150, L"1.5x", 1.5 },
+                        { ID_SPEED_200, L"2x", 2.0 },
+                    };
+                    for (auto& si : speedItems) {
+                        UINT flags = MF_STRING;
+                        if (curSpeed == si.val) flags |= MF_CHECKED;
+                        AppendMenuW(hSpeedMenu, flags, si.id, si.label);
+                    }
+                    AppendMenuW(hSpeedMenu, MF_SEPARATOR, 0, NULL);
+                    AppendMenuW(hSpeedMenu, MF_STRING, ID_SPEED_CUSTOM, L"自定义...");
+                    AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hSpeedMenu, L"倍速播放");
+
+                    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+                    AppendMenuW(hMenu, MF_STRING, 3103, L"在文件管理器中定位(&L)");
+                    AppendMenuW(hMenu, MF_STRING, 3104, L"从列表中移除(&R)");
+                    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+                    AppendMenuW(hMenu, MF_STRING, 3105, L"属性(&T)");
+                    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+                    AppendMenuW(hMenu, MF_STRING | (m_undoValid ? MF_ENABLED : MF_GRAYED),
+                        ID_UNDO_REMOVE, L"撤销移除(&U)");
+
+                    int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD, pt.x, pt.y, 0, m_hwnd, NULL);
+                    DestroyMenu(hMenu);
+
+                    if (cmd > 0) {
+                        switch (cmd) {
+                            case 3101: PlayFile(songIdx); break;
+                            case 3102:
+                                if (!m_audio.IsLoaded() || !m_audio.IsPlaying())
+                                    PlayFile(songIdx);
+                                else
+                                    m_nextScheduled = songIdx;
+                                break;
+                            case 3103: {
+                                std::wstring param = L"/select,\"" + path + L"\"";
+                                ShellExecuteW(NULL, L"open", L"explorer.exe", param.c_str(), NULL, SW_SHOWNORMAL);
+                                break;
+                            }
+                            case 3104: {
+                                if (m_nextScheduled == songIdx)
+                                    m_nextScheduled = -1;
+                                else if (m_nextScheduled > songIdx)
+                                    m_nextScheduled--;
+
+                                if (m_currentIndex == songIdx) {
+                                    KillTimer(m_hwnd, TIMER_ID_SEEK);
+                                    m_audio.Unload();
+                                    m_currentIndex = -1;
+                                    StopListening();
+                                } else if (m_currentIndex > songIdx) {
+                                    m_currentIndex--;
+                                }
+                                // Save undo info before removal
+                                m_undoSong = m_playlist.GetSong(songIdx);
+                                m_undoIndex = songIdx;
+                                m_undoValid = true;
+                                m_playlist.RemoveAt(songIdx);
+                                if (m_audio.GetPlayMode() == PlayMode::Shuffle || !m_shuffleOrder.empty())
+                                    Reshuffle();
+                                RebuildFilter();
+                                RefreshPlaylistUI();
+                                UpdatePlaylistSelection();
+                                UpdateUI();
+                                UpdateUndoMenuState();
+                                break;
+                            }
+                            case 3105: {
+                                SHELLEXECUTEINFOW sei = { sizeof(sei) };
+                                sei.lpVerb = L"properties";
+                                sei.lpFile = path.c_str();
+                                sei.nShow = SW_SHOW;
+                                sei.fMask = SEE_MASK_INVOKEIDLIST | SEE_MASK_NOCLOSEPROCESS;
+                                ShellExecuteExW(&sei);
+                                break;
+                            }
+                            case ID_UNDO_REMOVE: UndoRemove(); break;
+                            default:
+                                if (cmd == ID_SPEED_CUSTOM)
+                                    ShowSpeedInputDialog();
+                                else if (cmd >= ID_SPEED_025 && cmd <= ID_SPEED_200) {
+                                    double speeds[] = {0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0};
+                                    int speedIds[] = {ID_SPEED_025, ID_SPEED_050, ID_SPEED_075, ID_SPEED_100, ID_SPEED_125, ID_SPEED_150, ID_SPEED_200};
+                                    double chosenSpeed = 1.0;
+                                    for (int i = 0; i < 7; i++) {
+                                        if (cmd == speedIds[i]) {
+                                            chosenSpeed = speeds[i];
+                                            break;
+                                        }
+                                    }
+                                    PlayFile(songIdx);
+                                    ApplySpeed(chosenSpeed);
+                                }
+                                break;
+                        }
                     }
                     return 0;
                 }
@@ -888,6 +1104,12 @@ private:
                 if (m_currentIndex + 1 < count)
                     next = m_currentIndex + 1;
                 break;
+        }
+
+        // Override with next scheduled if set
+        if (m_nextScheduled >= 0 && m_nextScheduled < count) {
+            next = m_nextScheduled;
+            m_nextScheduled = -1;
         }
 
         if (next >= 0 && next < count) {
@@ -1130,7 +1352,7 @@ private:
             }
             SetTimer(m_hwnd, TIMER_ID_SEEK, 500, NULL);
         }
-        UpdatePlayButton();
+        UpdateUI();
     }
 
     void OnPrev() {
@@ -1226,9 +1448,32 @@ private:
         SaveSettings();
     }
 
+    void UpdateUndoMenuState() {
+        EnableMenuItem(GetMenu(m_hwnd), ID_UNDO_REMOVE,
+            MF_BYCOMMAND | (m_undoValid ? MF_ENABLED : MF_GRAYED));
+    }
+
+    void UndoRemove() {
+        if (!m_undoValid) return;
+        m_playlist.InsertAt(m_undoIndex, m_undoSong);
+        if (m_currentIndex >= m_undoIndex)
+            m_currentIndex++;
+        if (m_nextScheduled >= m_undoIndex)
+            m_nextScheduled++;
+        if (m_audio.GetPlayMode() == PlayMode::Shuffle || !m_shuffleOrder.empty())
+            Reshuffle();
+        m_undoValid = false;
+        RebuildFilter();
+        RefreshPlaylistUI();
+        UpdatePlaylistSelection();
+        UpdateUndoMenuState();
+    }
+
     void UpdateSettingsMenu() {
-        CheckMenuItem(m_settingsMenu, ID_SETTINGS_AUTOPLAY,
-            MF_BYCOMMAND | (m_settingsAutoplay ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(m_startupSubMenu, ID_STARTUP_NOTHING,
+            MF_BYCOMMAND | (m_settingsAutoplay == 0 ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(m_startupSubMenu, ID_STARTUP_AUTOPLAY,
+            MF_BYCOMMAND | (m_settingsAutoplay == 1 ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(m_settingsMenu, ID_SETTINGS_REMEMBER,
             MF_BYCOMMAND | (m_settingsRememberProgress ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(m_settingsMenu, ID_SETTINGS_TRAY,
@@ -1302,25 +1547,10 @@ private:
     
     bool SearchMatches(int playlistIdx) {
         const auto& song = m_playlist.GetSong(playlistIdx);
-        if (song.title.empty() && song.artist.empty() && song.album.empty())
-            return true;
-        // Get search text
         if (!m_searchEdit) return true;
         wchar_t searchBuf[256] = {};
         GetWindowTextW(m_searchEdit, searchBuf, 256);
-        if (searchBuf[0] == L'\0') return true;
-
-        // Case-insensitive comparison
-        std::wstring q = searchBuf;
-        for (auto& c : q) c = towlower(c);
-
-        auto contains = [&](const std::wstring& s) -> bool {
-            std::wstring ls = s;
-            for (auto& c : ls) c = towlower(c);
-            return ls.find(q) != std::wstring::npos;
-        };
-
-        return contains(song.title) || contains(song.artist) || contains(song.album);
+        return SearchMatchesText(searchBuf, song.title, song.artist, song.album);
     }
 
     void RebuildFilter() {
@@ -1506,6 +1736,7 @@ private:
                     std::wstring ks = HotkeyToString(vk, mod);
                     SetWindowTextW(GetDlgItem(hDlg, 100 + idx), ks.c_str());
                     c->recording = -1;
+                    ReleaseCapture();
                     continue; // Don't dispatch to focused control
                 }
             }
@@ -1560,30 +1791,28 @@ private:
 
     void ShowStatsWindow() {
         const wchar_t STATS_CLASS[] = L"StatsWindow";
-        int dlgW = 620, dlgH = 600;
+        int dlgW = 660, dlgH = 620;
         int sw = GetSystemMetrics(SM_CXSCREEN);
         int sh = GetSystemMetrics(SM_CYSCREEN);
         int x = (sw - dlgW) / 2, y = (sh - dlgH) / 2;
 
         HWND hDlg = CreateWindowExW(0, STATS_CLASS, L"听歌时长统计",
-            WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+            WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_VISIBLE,
             x, y, dlgW, dlgH, m_hwnd, NULL, m_hInst, NULL);
         if (!hDlg) return;
 
         StatsDlgCtx* ctx = new StatsDlgCtx();
         ctx->win = this;
         ctx->rangeDays = 30;
-        ctx->customValue = 2;
         ctx->useCalendarRange = false;
+        ctx->dtpGuard = false;
         memset(&ctx->calStart, 0, sizeof(SYSTEMTIME));
         memset(&ctx->calEnd, 0, sizeof(SYSTEMTIME));
         ctx->hRadio7 = NULL;
         ctx->hRadio30 = NULL;
         ctx->hRadioCustom = NULL;
-        ctx->hDisplayCustom = NULL;
-        ctx->hUpBtn = NULL;
-        ctx->hDownBtn = NULL;
-        ctx->hBtnCalendar = NULL;
+        ctx->hDtpStart = NULL;
+        ctx->hDtpEnd = NULL;
         ctx->hDayList = NULL;
         ctx->hWeekList = NULL;
         ctx->hTotalText = NULL;
@@ -1598,56 +1827,60 @@ private:
             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, NULL);
 
         int yPos = 15;
+        int rY = yPos + 18;
 
-        CreateWindowExW(0, L"STATIC", L"统计范围",
-            WS_CHILD | WS_VISIBLE, 15, yPos, 100, 20, hDlg, NULL, m_hInst, NULL);
+        // --- Group box: 统计周期 ---
+        CreateWindowExW(0, L"BUTTON", L"统计周期",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            10, yPos, dlgW - 20, 50, hDlg, NULL, m_hInst, NULL);
 
-        yPos += 22;
         ctx->hRadio7 = CreateWindowExW(0, L"BUTTON", L"7天",
             WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
-            30, yPos, 60, 22, hDlg, (HMENU)300, m_hInst, NULL);
+            25, rY, 55, 22, hDlg, (HMENU)300, m_hInst, NULL);
         SendMessageW(ctx->hRadio7, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
 
         ctx->hRadio30 = CreateWindowExW(0, L"BUTTON", L"30天",
             WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-            110, yPos, 60, 22, hDlg, (HMENU)301, m_hInst, NULL);
+            90, rY, 60, 22, hDlg, (HMENU)301, m_hInst, NULL);
         SendMessageW(ctx->hRadio30, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
         SendMessageW(ctx->hRadio30, BM_SETCHECK, BST_CHECKED, 0);
 
         ctx->hRadioCustom = CreateWindowExW(0, L"BUTTON", L"自定义",
             WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-            190, yPos, 65, 22, hDlg, (HMENU)302, m_hInst, NULL);
+            155, rY, 65, 22, hDlg, (HMENU)302, m_hInst, NULL);
         SendMessageW(ctx->hRadioCustom, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
 
-        // Slot-machine style: up ▲ / number display / down ▼
-        ctx->hUpBtn = CreateWindowExW(0, L"BUTTON", L"▲",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            265, yPos - 14, 44, 18, hDlg, (HMENU)306, m_hInst, NULL);
-        SendMessageW(ctx->hUpBtn, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
+        // --- DTP row + buttons ---
+        yPos += 62;
+        int dtpY = yPos;
 
-        ctx->hDisplayCustom = CreateWindowExW(0, L"STATIC", L"2",
-            WS_CHILD | WS_VISIBLE | WS_BORDER | SS_CENTER | SS_SUNKEN,
-            265, yPos + 3, 44, 24, hDlg, NULL, m_hInst, NULL);
-        SendMessageW(ctx->hDisplayCustom, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
+        CreateWindowExW(0, L"STATIC", L"起始:",
+            WS_CHILD | WS_VISIBLE, 15, dtpY + 3, 35, 20, hDlg, (HMENU)312, m_hInst, NULL);
+        ctx->hDtpStart = CreateWindowExW(0, DATETIMEPICK_CLASSW, NULL,
+            WS_CHILD | WS_VISIBLE | DTS_SHORTDATEFORMAT,
+            50, dtpY, 130, 26, hDlg, (HMENU)310, m_hInst, NULL);
+        SendMessageW(ctx->hDtpStart, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
 
-        ctx->hDownBtn = CreateWindowExW(0, L"BUTTON", L"▼",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            265, yPos + 25, 44, 18, hDlg, (HMENU)307, m_hInst, NULL);
-        SendMessageW(ctx->hDownBtn, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
-
-        CreateWindowExW(0, L"STATIC", L"×30天",
-            WS_CHILD | WS_VISIBLE, 310, yPos + 8, 50, 20, hDlg, NULL, m_hInst, NULL);
-
-        ctx->hBtnCalendar = CreateWindowExW(0, L"BUTTON", L"选择...",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            365, yPos - 2, 60, 26, hDlg, (HMENU)308, m_hInst, NULL);
-        SendMessageW(ctx->hBtnCalendar, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
+        CreateWindowExW(0, L"STATIC", L"终止:",
+            WS_CHILD | WS_VISIBLE, 200, dtpY + 3, 35, 20, hDlg, (HMENU)313, m_hInst, NULL);
+        ctx->hDtpEnd = CreateWindowExW(0, DATETIMEPICK_CLASSW, NULL,
+            WS_CHILD | WS_VISIBLE | DTS_SHORTDATEFORMAT,
+            235, dtpY, 130, 26, hDlg, (HMENU)311, m_hInst, NULL);
+        SendMessageW(ctx->hDtpEnd, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
 
         CreateWindowExW(0, L"BUTTON", L"刷新",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            435, yPos - 2, 70, 26, hDlg, (HMENU)304, m_hInst, NULL);
+            dlgW - 100, dtpY - 2, 80, 28, hDlg, (HMENU)304, m_hInst, NULL);
+        SendMessageW(GetDlgItem(hDlg, 304), WM_SETFONT, (WPARAM)hGuiFont, TRUE);
 
-        yPos += 34;
+        SYSTEMTIME todayDtp;
+        GetLocalTime(&todayDtp);
+        SendMessageW(ctx->hDtpStart, DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&todayDtp);
+        SendMessageW(ctx->hDtpEnd, DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&todayDtp);
+        ctx->calStart = todayDtp;
+        ctx->calEnd = todayDtp;
+
+        yPos = dtpY + 34;
 
         CreateWindowExW(0, L"STATIC", L"每日详情",
             WS_CHILD | WS_VISIBLE, 15, yPos, 100, 20, hDlg, NULL, m_hInst, NULL);
@@ -1711,6 +1944,40 @@ private:
             dlgW / 2 + 20, yPos, 90, 28, hDlg, (HMENU)IDCANCEL, m_hInst, NULL);
 
         RefreshStatsDisplay(ctx);
+
+        // Save base layout values for proportional resize
+        {
+            RECT cr;
+            GetClientRect(hDlg, &cr);
+            ctx->baseW = cr.right;
+            ctx->baseH = cr.bottom;
+            int yp = 15;
+            yp += 62;
+            yp += 34;
+            yp += 20;
+            ctx->yDayList = yp;
+            ctx->hDay = 130;
+            yp += 138;
+            yp += 20;
+            ctx->yWeekList = yp;
+            ctx->hWeek = 70;
+            yp += 78;
+            yp += 20;
+            ctx->yPlayList = yp;
+            ctx->hPlay = 90;
+            yp += 98;
+            ctx->yTotal = yp;
+            yp += 28;
+            ctx->yButtons = yp;
+        }
+
+        // Force initial layout pass: WM_SIZE during CreateWindowEx fired
+        // before baseH was set, so LayoutStatsControls skipped.
+        {
+            RECT cr;
+            GetClientRect(hDlg, &cr);
+            LayoutStatsControls(ctx, cr.right, cr.bottom);
+        }
 
         DeleteObject(hBoldFont);
         DeleteObject(hGuiFont);
@@ -1893,7 +2160,6 @@ private:
         EnableWindow(m_btnNext,  hasItems);
         EnableWindow(m_trackSeek, loaded);
         EnableWindow(m_sliderVol, loaded);
-        UpdatePlayButton();
         UpdateModeUI();
         UpdateVolLabel();
         if (!loaded) {
@@ -1902,9 +2168,19 @@ private:
         }
     }
 
-    void UpdatePlayButton() {
-        SetWindowTextW(m_btnPlay, m_audio.IsPlaying() ? L"⏸" : L"▶");
+    void LocateCurrentSong() {
+        if (m_currentIndex < 0 || m_currentIndex >= m_playlist.GetCount()) return;
+        for (int i = 0; i < (int)m_filterMap.size(); i++) {
+            if (m_filterMap[i] == m_currentIndex) {
+                ListView_SetItemState(m_playlistLV, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+                ListView_SetItemState(m_playlistLV, i, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+                ListView_EnsureVisible(m_playlistLV, i, FALSE);
+                UpdatePlaylistSelection();
+                break;
+            }
+        }
     }
+
 
     void UpdateVolLabel() {
         int vol = (int)SendMessageW(m_sliderVol, TBM_GETPOS, 0, 0);
@@ -2069,7 +2345,7 @@ private:
         DWORD written;
         char buf[200];
         int len = sprintf(buf, "autoplay=%d\nremember_progress=%d\ntray_minimize=%d\nplay_mode=%d\nplay_speed=%.2f\n",
-                          m_settingsAutoplay ? 1 : 0,
+                          m_settingsAutoplay,
                           m_settingsRememberProgress ? 1 : 0,
                           m_settingsTray ? 1 : 0,
                           (int)m_audio.GetPlayMode(),
@@ -2133,9 +2409,11 @@ private:
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         nid.uCallbackMessage = WM_APP_TRAY;
         nid.hIcon = LoadIconW(m_hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
-        // Use current song info if available
         BuildTrayTipText(nid.szTip, 128);
-        Shell_NotifyIconW(NIM_ADD, &nid);
+        if (!Shell_NotifyIconW(NIM_ADD, &nid)) {
+            WriteLog(L"Shell_NotifyIconW NIM_ADD failed (err=%lu)", GetLastError());
+            return;
+        }
         m_trayIconAdded = true;
     }
 
@@ -2269,20 +2547,27 @@ private:
             size_t pathLen = nl3 ? (size_t)(nl3 - p) : wcslen(p);
             if (pathLen > 0 && p[pathLen-1] == L'\r') --pathLen;
             std::wstring savedPath(p, pathLen);
+            const std::wstring* targetPath = nullptr;
+            int targetIndex = -1;
             if (!savedPath.empty()) {
                 for (int i = 0; i < m_playlist.GetCount(); i++) {
                     if (m_playlist.GetFile(i) == savedPath) {
-                        PlayFile(i);
-                        if (savedPos > 0) m_audio.SetPosition(savedPos);
-                        loaded = true;
+                        targetPath = &savedPath;
+                        targetIndex = i;
                         break;
                     }
                 }
             }
-            if (!loaded && savedIndex >= 0 && savedIndex < m_playlist.GetCount()) {
-                PlayFile(savedIndex);
-                if (savedPos > 0) m_audio.SetPosition(savedPos);
-                loaded = true;
+            if (targetIndex < 0 && savedIndex >= 0 && savedIndex < m_playlist.GetCount()) {
+                targetPath = &m_playlist.GetFile(savedIndex);
+                targetIndex = savedIndex;
+            }
+            if (targetIndex >= 0 && targetPath) {
+                if (m_audio.Load(*targetPath)) {
+                    m_currentIndex = targetIndex;
+                    if (savedPos > 0) m_audio.SetPosition(savedPos);
+                    loaded = true;
+                }
             }
         } else { CloseHandle(hFile); }
         return loaded;
@@ -2484,6 +2769,16 @@ private:
 
 // Hotkey dialog procedure
 static LRESULT CALLBACK HotkeyDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_CAPTURECHANGED) {
+        HKDlgCtx* c = (HKDlgCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
+        if (c && c->recording >= 0) {
+            int idx = c->recording;
+            c->recording = -1;
+            std::wstring ks = HotkeyToString(c->bindings[idx].vk, c->bindings[idx].mod);
+            SetWindowTextW(GetDlgItem(hDlg, 100 + idx), ks.c_str());
+        }
+        return 0;
+    }
     if (msg == WM_CLOSE) { DestroyWindow(hDlg); return 0; }
     if (msg == WM_COMMAND) {
         int ctrlId = LOWORD(wp);
@@ -2494,6 +2789,7 @@ static LRESULT CALLBACK HotkeyDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
             int idx = ctrlId - 200;
             c->recording = idx;
             SetWindowTextW(GetDlgItem(hDlg, 100 + idx), L"[按下新按键...]");
+            SetCapture(hDlg);
             return 0;
         }
         if (ctrlId == 1 || ctrlId == IDOK) {
@@ -2522,14 +2818,163 @@ static void ExportStatsToJson(const StatsDlgCtx* ctx) {
     CloseHandle(hFile);
 }
 
+// Compute a SYSTEMTIME offset by `days` from today (negative = past)
+static SYSTEMTIME DateFromNow(int days) {
+    time_t now = time(NULL);
+    struct tm tm = *localtime(&now);
+    tm.tm_mday += days;
+    tm.tm_isdst = -1;
+    mktime(&tm);
+    SYSTEMTIME st = {};
+    st.wYear   = tm.tm_year + 1900;
+    st.wMonth  = tm.tm_mon + 1;
+    st.wDay    = tm.tm_mday;
+    return st;
+}
+
+// Set both DTP controls to reflect a fixed-day range (e.g. 7 or 30)
+static void SyncDtpToRange(StatsDlgCtx* c) {
+    if (!c->hDtpStart || !c->hDtpEnd) return;
+    SYSTEMTIME endSt = DateFromNow(0);
+    SYSTEMTIME startSt = DateFromNow(-c->rangeDays);
+    c->dtpGuard = true;
+    SendMessageW(c->hDtpStart, DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&startSt);
+    SendMessageW(c->hDtpEnd,   DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&endSt);
+    c->dtpGuard = false;
+}
+
+// Validate custom DTP range.
+static bool ValidateCustomRange(StatsDlgCtx* c, HWND hDlg) {
+    SYSTEMTIME nowSt = DateFromNow(0);
+    auto toInt = [](const SYSTEMTIME& s) -> int {
+        return (int)s.wYear * 10000 + (int)s.wMonth * 100 + (int)s.wDay;
+    };
+    int endN = toInt(c->calEnd);
+    int startN = toInt(c->calStart);
+    int todayN = toInt(nowSt);
+
+    bool changed = false;
+    if (endN > todayN) {
+        MessageBoxW(hDlg, L"终止日期不能超过今天，已自动修正。", L"日期范围", MB_OK | MB_ICONINFORMATION);
+        c->calEnd = nowSt;
+        changed = true;
+    }
+    if (startN > endN) {
+        MessageBoxW(hDlg, L"起始日期晚于终止日期，已自动修正。", L"日期范围", MB_OK | MB_ICONINFORMATION);
+        c->calStart = c->calEnd;
+        changed = true;
+    }
+    if (changed) {
+        c->dtpGuard = true;
+        SendMessageW(c->hDtpStart, DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&c->calStart);
+        SendMessageW(c->hDtpEnd,   DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&c->calEnd);
+        c->dtpGuard = false;
+    }
+    return true;
+}
+
+// Distribute extra space vertically to the three list views proportionally,
+// and reflow DTPs / "刷新" horizontally.
+static void LayoutStatsControls(StatsDlgCtx* c, int clientW, int clientH) {
+    int extraH = clientH - c->baseH;
+    int totalBaseH = c->hDay + c->hWeek + c->hPlay;
+
+    auto scaleH = [&](int baseH) -> int {
+        return baseH + extraH * baseH / totalBaseH;
+    };
+
+    int newDayH  = scaleH(c->hDay);
+    int newWeekH = scaleH(c->hWeek);
+    int newPlayH = scaleH(c->hPlay);
+
+    int shiftDay  = newDayH - c->hDay;
+    int shiftWeek = shiftDay + (newWeekH - c->hWeek);
+
+    int margin = 15;
+    int listW = (clientW > margin * 2) ? clientW - margin * 2 : 200;
+
+    SetWindowPos(c->hDayList, NULL, margin, c->yDayList, listW, newDayH, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(c->hWeekList, NULL, margin, c->yWeekList + shiftDay, listW, newWeekH, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(c->hPlayCountList, NULL, margin, c->yPlayList + shiftWeek, listW, newPlayH, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(c->hTotalText, NULL, margin, c->yTotal + extraH, listW, 22, SWP_NOZORDER | SWP_NOACTIVATE);
+
+    int btnY = c->yButtons + extraH;
+    SetWindowPos(GetDlgItem(c->hDlg, 305), NULL, clientW / 2 - 120, btnY, 120, 28, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(GetDlgItem(c->hDlg, IDCANCEL), NULL, clientW / 2 + 20, btnY, 90, 28, SWP_NOZORDER | SWP_NOACTIVATE);
+
+    // Horizontal: widen DTPs, move labels, right-align "刷新"
+    if (c->hDtpStart && c->hDtpEnd) {
+        int dtpX = 50, dtpW = 130;
+        int avail = clientW - dtpX - 110;
+        if (avail > dtpW * 2 + 80) {
+            dtpW = (avail - 80) / 2;
+            if (dtpW > 250) dtpW = 250;
+        }
+        int dtp2X = dtpX + dtpW + 55;
+        int dtpY = c->yDayList - 54;
+        SetWindowPos(c->hDtpStart, NULL, dtpX, dtpY, dtpW, 26, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(c->hDtpEnd, NULL, dtp2X, dtpY, dtpW, 26, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(GetDlgItem(c->hDlg, 312), NULL, 15, dtpY + 3, 35, 20, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(GetDlgItem(c->hDlg, 313), NULL, dtp2X - 35, dtpY + 3, 35, 20, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    SetWindowPos(GetDlgItem(c->hDlg, 304), NULL, clientW - 100, c->yDayList - 56, 80, 28, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 // Stats dialog procedure
 static LRESULT CALLBACK StatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_GETMINMAXINFO) {
+        MINMAXINFO* mmi = (MINMAXINFO*)lp;
+        mmi->ptMinTrackSize.x = 660;
+        mmi->ptMinTrackSize.y = 620;
+        mmi->ptMaxTrackSize.x = 1400;
+        mmi->ptMaxTrackSize.y = 1200;
+        return 0;
+    }
+    if (msg == WM_SIZE && wp != SIZE_MINIMIZED) {
+        StatsDlgCtx* c = (StatsDlgCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
+        if (c && c->baseH > 0) {
+            LayoutStatsControls(c, LOWORD(lp), HIWORD(lp));
+        }
+        return 0;
+    }
     if (msg == WM_CLOSE) { DestroyWindow(hDlg); return 0; }
     if (msg == WM_DESTROY) {
         StatsDlgCtx* c = (StatsDlgCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
-        delete c;
-        SetWindowLongPtrW(hDlg, GWLP_USERDATA, 0);
+        if (c) {
+            HWND hOwner = GetWindow(hDlg, GW_OWNER);
+            delete c;
+            SetWindowLongPtrW(hDlg, GWLP_USERDATA, 0);
+            // Post a message to bring the owner to foreground after
+            // DestroyWindow fully completes. Direct SetForegroundWindow
+            // inside WM_DESTROY can be overridden by Windows internal
+            // focus processing during window destruction.
+            if (hOwner && IsWindow(hOwner)) {
+                PostMessage(hOwner, WM_APP_BRING_TO_TOP, 0, 0);
+            }
+        } else {
+            SetWindowLongPtrW(hDlg, GWLP_USERDATA, 0);
+        }
         return 0;
+    }
+    if (msg == WM_NOTIFY) {
+        LPNMHDR nm = (LPNMHDR)lp;
+        if (nm->code == DTN_DATETIMECHANGE && (nm->idFrom == 310 || nm->idFrom == 311)) {
+            StatsDlgCtx* c = (StatsDlgCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
+            if (!c || c->dtpGuard) return 0;
+            SYSTEMTIME st;
+            if (SendMessageW(nm->hwndFrom, DTM_GETSYSTEMTIME, 0, (LPARAM)&st) != GDT_VALID)
+                return 0;
+            if (nm->idFrom == 310) c->calStart = st;
+            else c->calEnd = st;
+            c->useCalendarRange = true;
+            ValidateCustomRange(c, hDlg);
+            SendMessageW(c->hRadio7, BM_SETCHECK, BST_UNCHECKED, 0);
+            SendMessageW(c->hRadio30, BM_SETCHECK, BST_UNCHECKED, 0);
+            SendMessageW(c->hRadioCustom, BM_SETCHECK, BST_CHECKED, 0);
+            c->win->RefreshStatsDisplay(c);
+            return 0;
+        }
+        return DefWindowProcW(hDlg, msg, wp, lp);
     }
     if (msg == WM_COMMAND) {
         StatsDlgCtx* c = (StatsDlgCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
@@ -2547,8 +2992,13 @@ static LRESULT CALLBACK StatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) 
             else if (SendMessageW(c->hRadio30, BM_GETCHECK, 0, 0) == BST_CHECKED)
                 c->rangeDays = 30;
             else {
-                if (c->customValue < 1) c->customValue = 1;
-                c->rangeDays = c->customValue * 30;
+                SYSTEMTIME st;
+                if (c->hDtpStart && SendMessageW(c->hDtpStart, DTM_GETSYSTEMTIME, 0, (LPARAM)&st) == GDT_VALID)
+                    c->calStart = st;
+                if (c->hDtpEnd && SendMessageW(c->hDtpEnd, DTM_GETSYSTEMTIME, 0, (LPARAM)&st) == GDT_VALID)
+                    c->calEnd = st;
+                c->useCalendarRange = true;
+                ValidateCustomRange(c, hDlg);
             }
             c->win->RefreshStatsDisplay(c);
             return 0;
@@ -2557,169 +3007,26 @@ static LRESULT CALLBACK StatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) 
         if (id == 300) { // Radio 7
             c->useCalendarRange = false;
             c->rangeDays = 7;
+            SyncDtpToRange(c);
             c->win->RefreshStatsDisplay(c);
             return 0;
         }
         if (id == 301) { // Radio 30
             c->useCalendarRange = false;
             c->rangeDays = 30;
+            SyncDtpToRange(c);
             c->win->RefreshStatsDisplay(c);
             return 0;
         }
         if (id == 302) { // Radio Custom
-            if (c->useCalendarRange) {
-                c->win->RefreshStatsDisplay(c);
-            } else {
-                if (c->customValue < 1) c->customValue = 1;
-                c->rangeDays = c->customValue * 30;
-                c->win->RefreshStatsDisplay(c);
-            }
+            c->useCalendarRange = true;
+            c->win->RefreshStatsDisplay(c);
             return 0;
         }
 
-        if (id == 306) { // Up arrow
-            c->useCalendarRange = false;
-            c->customValue++;
-            if (c->customValue > 999) c->customValue = 999;
-            {
-                wchar_t buf[8];
-                swprintf(buf, 8, L"%d", c->customValue);
-                SetWindowTextW(c->hDisplayCustom, buf);
-            }
-            if (SendMessageW(c->hRadioCustom, BM_GETCHECK, 0, 0) == BST_CHECKED) {
-                c->rangeDays = c->customValue * 30;
-                c->win->RefreshStatsDisplay(c);
-            }
-            return 0;
-        }
-        if (id == 307) { // Down arrow
-            c->useCalendarRange = false;
-            c->customValue--;
-            if (c->customValue < 1) c->customValue = 1;
-            {
-                wchar_t buf[8];
-                swprintf(buf, 8, L"%d", c->customValue);
-                SetWindowTextW(c->hDisplayCustom, buf);
-            }
-            if (SendMessageW(c->hRadioCustom, BM_GETCHECK, 0, 0) == BST_CHECKED) {
-                c->rangeDays = c->customValue * 30;
-                c->win->RefreshStatsDisplay(c);
-            }
-            return 0;
-        }
-
-        if (id == 308) { // Calendar date range picker
-            static bool calClass = false;
-            if (!calClass) {
-                calClass = true;
-                WNDCLASSEXW cwc = {};
-                cwc.cbSize        = sizeof(cwc);
-                cwc.style         = CS_HREDRAW | CS_VREDRAW;
-                cwc.lpfnWndProc   = CalendarDlgProc;
-                cwc.hInstance     = GetModuleHandleW(NULL);
-                cwc.hCursor       = LoadCursor(NULL, IDC_ARROW);
-                cwc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-                cwc.lpszClassName = L"CalendarWindow";
-                RegisterClassExW(&cwc);
-            }
-
-            CalendarCtx* calCtx = new CalendarCtx();
-            calCtx->statsCtx = c;
-            SYSTEMTIME today;
-            GetLocalTime(&today);
-
-            int cw = 260, ch = 270;
-            RECT cr;
-            GetWindowRect(hDlg, &cr);
-            int cx = cr.left + (cr.right - cr.left - cw) / 2;
-            int cy = cr.top + (cr.bottom - cr.top - ch) / 2;
-
-            EnableWindow(hDlg, FALSE);
-            HWND hCalDlg = CreateWindowExW(WS_EX_DLGMODALFRAME,
-                L"CalendarWindow", L"选择日期范围",
-                WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-                cx, cy, cw, ch, hDlg, NULL, GetModuleHandleW(NULL), calCtx);
-            if (hCalDlg) {
-                HWND hCal = CreateWindowExW(0, MONTHCAL_CLASSW, NULL,
-                    WS_CHILD | WS_VISIBLE | MCS_MULTISELECT,
-                    10, 10, 230, 180, hCalDlg, NULL, GetModuleHandleW(NULL), NULL);
-                SendMessageW(hCal, MCM_SETMAXSELCOUNT, 3650, 0);
-                SendMessageW(hCal, MCM_SETTODAY, 0, (LPARAM)&today);
-                SYSTEMTIME initRange[2] = { today, today };
-                initRange[1].wDay++;
-                SendMessageW(hCal, MCM_SETSELRANGE, 0, (LPARAM)initRange);
-
-                CreateWindowExW(0, L"BUTTON", L"确定",
-                    WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                    55, 200, 70, 26, hCalDlg, (HMENU)1, GetModuleHandleW(NULL), NULL);
-                CreateWindowExW(0, L"BUTTON", L"取消",
-                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    135, 200, 70, 26, hCalDlg, (HMENU)2, GetModuleHandleW(NULL), NULL);
-            } else {
-                delete calCtx;
-                EnableWindow(hDlg, TRUE);
-                SetForegroundWindow(hDlg);
-            }
-            return 0;
-        }
         if (id == 305) { // Export button
             ExportStatsToJson(c);
             MessageBoxW(hDlg, L"统计数据已导出到 .stats_export.json", L"导出成功", MB_OK);
-            return 0;
-        }
-        return 0;
-    }
-    return DefWindowProcW(hDlg, msg, wp, lp);
-}
-
-
-// Calendar dialog proc: month calendar range picker
-static LRESULT CALLBACK CalendarDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
-    if (msg == WM_CLOSE) {
-        CalendarCtx* ctx = (CalendarCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
-        if (ctx) { delete ctx; SetWindowLongPtrW(hDlg, GWLP_USERDATA, 0); }
-        HWND hParent = GetParent(hDlg);
-        EnableWindow(hParent, TRUE);
-        SetForegroundWindow(hParent);
-        DestroyWindow(hDlg);
-        return 0;
-    }
-    if (msg == WM_DESTROY) {
-        CalendarCtx* ctx = (CalendarCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
-        HWND hParent = GetParent(hDlg);
-        EnableWindow(hParent, TRUE);
-        SetForegroundWindow(hParent);
-        return 0;
-    }
-    if (msg == WM_COMMAND) {
-        int id = LOWORD(wp);
-        if (id == 2) { // Cancel
-            CalendarCtx* ctx = (CalendarCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
-            if (ctx) { delete ctx; SetWindowLongPtrW(hDlg, GWLP_USERDATA, 0); }
-            DestroyWindow(hDlg);
-            return 0;
-        }
-        if (id == 1) { // OK
-            CalendarCtx* ctx = (CalendarCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
-            if (ctx) {
-                StatsDlgCtx* sctx = ctx->statsCtx;
-                HWND hCal = FindWindowExW(hDlg, NULL, MONTHCAL_CLASSW, NULL);
-                if (hCal) {
-                    SYSTEMTIME range[2];
-                    SendMessageW(hCal, MCM_GETSELRANGE, 0, (LPARAM)range);
-                    sctx->calStart = range[0];
-                    sctx->calEnd = range[1];
-                    sctx->useCalendarRange = true;
-                    // Switch to custom radio to reflect custom range
-                    SendMessageW(sctx->hRadio7, BM_SETCHECK, BST_UNCHECKED, 0);
-                    SendMessageW(sctx->hRadio30, BM_SETCHECK, BST_UNCHECKED, 0);
-                    SendMessageW(sctx->hRadioCustom, BM_SETCHECK, BST_CHECKED, 0);
-                    sctx->win->RefreshStatsDisplay(sctx);
-                }
-            }
-            delete ctx;
-            SetWindowLongPtrW(hDlg, GWLP_USERDATA, 0);
-            DestroyWindow(hDlg);
             return 0;
         }
         return 0;

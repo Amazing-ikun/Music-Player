@@ -2,6 +2,70 @@
 #include <cstring>
 #pragma warning(disable : 4996)
 
+static bool HasExtension(const std::wstring& path, const wchar_t* ext) {
+    size_t dot = path.rfind(L'.');
+    if (dot == std::wstring::npos) return false;
+    std::wstring e = path.substr(dot);
+    for (auto& c : e) c = towlower(c);
+    return e == ext;
+}
+
+// UTF-8 → UTF-16, fallback to system ANSI
+static std::wstring ToWide(const std::string& s) {
+    if (s.empty()) return L"";
+    int len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.c_str(), -1, NULL, 0);
+    if (len > 0) {
+        std::wstring ws(static_cast<size_t>(len) - 1, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &ws[0], len);
+        return ws;
+    }
+    len = MultiByteToWideChar(CP_ACP, 0, s.c_str(), -1, NULL, 0);
+    if (len <= 0) return L"";
+    std::wstring ws(static_cast<size_t>(len) - 1, L'\0');
+    MultiByteToWideChar(CP_ACP, 0, s.c_str(), -1, &ws[0], len);
+    return ws;
+}
+
+// UTF-16 → UTF-8
+static std::string ToUtf8(const std::wstring& ws) {
+    if (ws.empty()) return "";
+    int len = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, NULL, 0, NULL, NULL);
+    if (len <= 0) return "";
+    std::string s(static_cast<size_t>(len) - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, &s[0], len, NULL, NULL);
+    return s;
+}
+
+// ID3v1 tag reader via BASS
+struct ID3Reader {
+    struct Result {
+        std::string artist;
+        std::string title;
+        bool valid = false;
+    };
+
+    static Result Read(HSTREAM stream) {
+        Result r;
+        const char* id3 = (const char*)BASS_ChannelGetTags(stream, BASS_TAG_ID3);
+        if (!id3 || memcmp(id3, "TAG", 3) != 0) return r;
+
+        auto trimField = [](const char* data, int maxLen) {
+            std::string s;
+            s.reserve(maxLen);
+            for (int i = 0; i < maxLen && data[i] && data[i] != '\0'; ++i) {
+                if (data[i] != ' ' || !s.empty()) s += data[i];
+            }
+            while (!s.empty() && s.back() == ' ') s.pop_back();
+            return s;
+        };
+
+        r.artist = trimField(id3 + 33, 30);
+        r.title  = trimField(id3 + 3, 30);
+        r.valid  = !r.artist.empty() || !r.title.empty();
+        return r;
+    }
+};
+
 // 构造函数
 AudioEngine::AudioEngine()
     : m_stream(0)
@@ -66,11 +130,27 @@ bool AudioEngine::Load(const std::wstring& filePath) {
         m_stream = 0;
     }
 
+    // 检查文件是否为空
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (GetFileAttributesExW(filePath.c_str(), GetFileExInfoStandard, &fad)) {
+        if (fad.nFileSizeHigh == 0 && fad.nFileSizeLow == 0) {
+            m_error = AudioError::FileNotFound;
+            return false;
+        }
+    }
+
     // 创建临时解码流，然后用 BASS_FX_TempoCreate 包装以实现变速不变调
     HSTREAM decoder = BASS_StreamCreateFile(FALSE, filePath.c_str(), 0, 0,
         BASS_STREAM_DECODE | BASS_UNICODE);
     if (!decoder) {
         m_error = MapBassError(BASS_ErrorGetCode());
+        // 如果是 FLAC 文件且解码器缺失，给出更明确的提示
+        if ((m_error == AudioError::UnsupportedFormat || m_error == AudioError::UnsupportedParam)
+            && HasExtension(filePath, L".flac")) {
+            if (!BASS_PluginLoad(L"bassflac.dll", 0)) {
+                m_error = AudioError::MissingCodec;
+            }
+        }
         return false;
     }
 
@@ -144,7 +224,8 @@ void AudioEngine::SetVolume(int volume) {
 double AudioEngine::GetPosition() const {
     if (!m_stream) return 0.0;
     QWORD bytes = BASS_ChannelGetPosition(m_stream, BASS_POS_BYTE);
-    if (bytes == 0) return 0.0;
+    QWORD len   = BASS_ChannelGetLength(m_stream, BASS_POS_BYTE);
+    if (bytes == 0 || bytes > len) return 0.0;
     return BASS_ChannelBytes2Seconds(m_stream, bytes);
 }
 
@@ -158,7 +239,9 @@ double AudioEngine::GetLength() const {
 
 // 跳转到指定位置（秒）
 void AudioEngine::SetPosition(double seconds) {
-    if (!m_stream) return;
+    if (!m_stream || seconds < 0) return;
+    double length = GetLength();
+    if (length > 0 && seconds > length) seconds = length;
     QWORD bytes = BASS_ChannelSeconds2Bytes(m_stream, seconds);
     BASS_ChannelSetPosition(m_stream, bytes, BASS_POS_BYTE);
 }
@@ -199,47 +282,16 @@ std::wstring AudioEngine::GetFormattedMetadata() const {
 
     // --- 尝试 ID3v1 (系统编码，中文环境下为 GBK) ---
     if (artist.empty() && title.empty()) {
-        const char* id3 = (const char*)BASS_ChannelGetTags(m_stream, BASS_TAG_ID3);
-        if (id3 && memcmp(id3, "TAG", 3) == 0) {
-            auto trimField = [](const char* data, int maxLen) {
-                std::string s;
-                s.reserve(maxLen);
-                for (int i = 0; i < maxLen && data[i] && data[i] != '\0'; ++i) {
-                    if (data[i] != ' ' || !s.empty()) s += data[i];
-                }
-                while (!s.empty() && s.back() == ' ') s.pop_back();
-                return s;
-            };
-            std::string a = trimField(id3 + 33, 30);
-            std::string t = trimField(id3 + 3, 30);
-            if (!a.empty() || !t.empty()) {
-                artist = a;
-                title = t;
-            }
+        auto r = ID3Reader::Read(m_stream);
+        if (r.valid) {
+            artist = r.artist;
+            title = r.title;
         }
     }
 
-    // --- 编码转换：UTF-8 → UTF-16, 失败时回退到系统编码 ---
-    auto toWide = [](const std::string& s) -> std::wstring {
-        if (s.empty()) return L"";
-        // 尝试 UTF-8
-        int len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-                                      s.c_str(), -1, NULL, 0);
-        if (len > 0) {
-            std::wstring ws(static_cast<size_t>(len) - 1, L'\0');
-            MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &ws[0], len);
-            return ws;
-        }
-        // 回退到系统 ANSI 编码
-        len = MultiByteToWideChar(CP_ACP, 0, s.c_str(), -1, NULL, 0);
-        if (len <= 0) return L"";
-        std::wstring ws(static_cast<size_t>(len) - 1, L'\0');
-        MultiByteToWideChar(CP_ACP, 0, s.c_str(), -1, &ws[0], len);
-        return ws;
-    };
-
-    std::wstring wa = toWide(artist);
-    std::wstring wt = toWide(title);
+    // --- 编码转换：UTF-8/ANSI → UTF-16 ---
+    std::wstring wa = ToWide(artist);
+    std::wstring wt = ToWide(title);
 
     if (!wa.empty() && !wt.empty()) return wa + L" - " + wt;
     if (!wt.empty())  return wt;
@@ -345,7 +397,7 @@ std::wstring AudioEngine::GetErrorMessage() const {
         case AudioError::Success:           return L"";
         case AudioError::FileNotFound:      return L"文件不存在或无法访问";
         case AudioError::UnsupportedFormat: return L"不支持此音频格式";
-        case AudioError::MissingCodec:      return L"缺少所需的解码器";
+        case AudioError::MissingCodec:      return L"缺少所需的解码器 (bassflac.dll)";
         case AudioError::UnsupportedParam:  return L"不支持的音频格式参数";
         case AudioError::DecodeFailed:      return L"解码失败";
         case AudioError::InitFailed:        return L"音频引擎未初始化";

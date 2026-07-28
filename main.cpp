@@ -2059,8 +2059,7 @@ private:
         int clientW = cr.right;
         int clientH = cr.bottom;
 
-        // Query font line height so we can size the edit control to an exact
-        // multiple, avoiding clipped descenders on the last visible row.
+        // Query font line height
         HDC hdc = GetDC(hDlg);
         HFONT hOldFont = (HFONT)SelectObject(hdc, hGuiFont);
         TEXTMETRICW tm;
@@ -2068,7 +2067,6 @@ private:
         SelectObject(hdc, hOldFont);
         ReleaseDC(hDlg, hdc);
         int lineH = tm.tmHeight;               // ascent + descent (logical units)
-        int borderLoss = 4;                    // WS_EX_CLIENTEDGE ~2 px per side
 
         // Close button: at the bottom center, 12px from client edge
         const int btnW = 80, btnH = 28, marginX = 20, gap = 12;
@@ -2078,8 +2076,6 @@ private:
         int labelY = 75;
         int editY = 95;
         int editH = btnY - gap - editY;
-        // Snap edit height to an exact multiple of line height
-        editH = ((editH - borderLoss) / lineH) * lineH + borderLoss;
 
         // App title
         HWND hTitle = CreateWindowExW(0, L"STATIC", L"MusicPlayer",
@@ -2107,6 +2103,18 @@ private:
             marginX, editY, clientW - marginX * 2, editH,
             hDlg, NULL, m_hInst, NULL);
         SendMessageW(hChangelog, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
+
+        // Snap the internal formatting rectangle height to an exact multiple
+        // of lineH, so every visible row has room for descenders and CJK
+        // glyphs without clipping.  EM_GETRECT returns the rect that already
+        // accounts for WS_EX_CLIENTEDGE border thickness (varies by theme).
+        RECT fmt;
+        SendMessageW(hChangelog, EM_GETRECT, 0, (LPARAM)&fmt);
+        int fmtH = fmt.bottom - fmt.top;
+        fmt.bottom = fmt.top + (fmtH / lineH) * lineH;
+        SendMessageW(hChangelog, EM_SETRECT, 0, (LPARAM)&fmt);
+        InvalidateRect(hChangelog, NULL, TRUE);
+
         SendMessageW(hChangelog, EM_SETSEL, 0, 0);
 
         // Close button

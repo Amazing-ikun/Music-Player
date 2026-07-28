@@ -5,13 +5,18 @@
 #include <commctrl.h>
 
 // MusicPlayer version
-static const wchar_t* APP_VERSION = L"1.0.0";
+static const wchar_t* APP_VERSION = L"1.0.1";
 
 // Changelog — shown in the About dialog
 static const wchar_t* CHANGELOG =
+    L"v1.0.1\r\n"
+    L"  - 修复关于对话框文本底部裁剪（指定 Microsoft YaHei 字体消除字体链接偏差）\r\n"
+    L"  - 修复关于对话框更新日志文本换行（\\n → \\r\\n）\r\n"
+    L"  - 修复关闭关于对话框后播放器窗口失焦\r\n"
+    L"\r\n"
     L"v1.0.0\r\n"
     L"  - 添加定时刷写听歌历史，防止直接关机丢失数据\r\n"
-    L"  - 添加关于对话框\r\n"
+    L"  - 添加关于对话框（版本号 + 更新历史）\r\n"
     L"\r\n"
     L"v0.9.0 (previous)\r\n"
     L"  - 添加 ID3 标签读取、搜索、撤销删除\r\n"

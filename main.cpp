@@ -2053,34 +2053,54 @@ private:
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, NULL);
 
+        // Get actual client area — title bar height varies by Windows version/DPI
+        RECT cr;
+        GetClientRect(hDlg, &cr);
+        int clientW = cr.right;
+        int clientH = cr.bottom;
+
+        // Close button: at the bottom center, 12px from client edge
+        const int btnW = 80, btnH = 28, marginX = 20, gap = 12;
+        int btnY = clientH - btnH - gap;
+
+        // Changelog: fill space between version line and close button
+        int labelY = 75;
+        int editY = 95;
+        int editH = btnY - gap - editY;
+
         // App title
         HWND hTitle = CreateWindowExW(0, L"STATIC", L"MusicPlayer",
-            WS_CHILD | WS_VISIBLE, 20, 15, dlgW - 40, 28, hDlg, NULL, m_hInst, NULL);
+            WS_CHILD | WS_VISIBLE, marginX, 15, clientW - marginX * 2, 28,
+            hDlg, NULL, m_hInst, NULL);
         SendMessageW(hTitle, WM_SETFONT, (WPARAM)hTitleFont, TRUE);
 
         // Version string
         wchar_t verBuf[64];
         swprintf(verBuf, 64, L"版本: %ls", APP_VERSION);
         HWND hVer = CreateWindowExW(0, L"STATIC", verBuf,
-            WS_CHILD | WS_VISIBLE, 20, 48, dlgW - 40, 20, hDlg, NULL, m_hInst, NULL);
+            WS_CHILD | WS_VISIBLE, marginX, 48, clientW - marginX * 2, 20,
+            hDlg, NULL, m_hInst, NULL);
         SendMessageW(hVer, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
 
         // Changelog label
         CreateWindowExW(0, L"STATIC", L"更新历史:",
-            WS_CHILD | WS_VISIBLE, 20, 75, 100, 16, hDlg, NULL, m_hInst, NULL);
+            WS_CHILD | WS_VISIBLE, marginX, labelY, 100, 16,
+            hDlg, NULL, m_hInst, NULL);
 
         // Changelog text (read-only, multiline edit with scrollbar)
         HWND hChangelog = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", CHANGELOG,
             WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY |
             ES_AUTOVSCROLL | WS_VSCROLL | ES_LEFT,
-            20, 95, dlgW - 40, dlgH - 155, hDlg, NULL, m_hInst, NULL);
+            marginX, editY, clientW - marginX * 2, editH,
+            hDlg, NULL, m_hInst, NULL);
         SendMessageW(hChangelog, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
         SendMessageW(hChangelog, EM_SETSEL, 0, 0);
 
         // Close button
         CreateWindowExW(0, L"BUTTON", L"确定",
             WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            dlgW / 2 - 40, dlgH - 48, 80, 28, hDlg, (HMENU)IDOK, m_hInst, NULL);
+            clientW / 2 - btnW / 2, btnY, btnW, btnH,
+            hDlg, (HMENU)IDOK, m_hInst, NULL);
 
         DeleteObject(hTitleFont);
         DeleteObject(hGuiFont);

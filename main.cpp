@@ -216,6 +216,7 @@ struct StatsDlgCtx {
     HWND hRadio7, hRadio30, hRadioCustom;
     HWND hDtpStart, hDtpEnd;
     HWND hDayList, hWeekList, hPlayCountList, hTotalText;
+    HWND hLabelDay, hLabelWeek, hLabelPlay;
     HWND hDlg;
     bool dtpGuard; // guard against re-entrancy from DTM_SETSYSTEMTIME
 };
@@ -1057,11 +1058,17 @@ private:
         if (m_audio.IsLoaded() && !m_userDraggingSeek) {
             UpdateSeekDisplay();
             UpdateTimeDisplay();
-            if (m_settingsRememberProgress) {
-                if (++m_saveTick >= 20) {
-                    m_saveTick = 0;
+            if (++m_saveTick >= 20) {
+                m_saveTick = 0;
+                if (m_settingsRememberProgress)
                     SaveLastSong();
+                // Periodically flush session time to disk so forced shutdown
+                // loses at most one interval (~10 s) of listening history
+                if (m_listening) {
+                    StopListening();
+                    StartListening();
                 }
+                m_history.Save(GetExeDirectory() + L"\\.history.txt");
             }
         }
     }
@@ -1387,6 +1394,7 @@ private:
     void OnFadeDone() {
         m_audio.OnFadeComplete();
         StopListening();
+        UpdateUI();
     }
 
     void SetPlayMode(PlayMode mode) {
@@ -1882,7 +1890,7 @@ private:
 
         yPos = dtpY + 34;
 
-        CreateWindowExW(0, L"STATIC", L"每日详情",
+        ctx->hLabelDay = CreateWindowExW(0, L"STATIC", L"每日详情",
             WS_CHILD | WS_VISIBLE, 15, yPos, 100, 20, hDlg, NULL, m_hInst, NULL);
 
         yPos += 20;
@@ -1900,7 +1908,7 @@ private:
 
         yPos += 138;
 
-        CreateWindowExW(0, L"STATIC", L"每周统计",
+        ctx->hLabelWeek = CreateWindowExW(0, L"STATIC", L"每周统计",
             WS_CHILD | WS_VISIBLE, 15, yPos, 100, 20, hDlg, NULL, m_hInst, NULL);
 
         yPos += 20;
@@ -1915,7 +1923,7 @@ private:
 
         yPos += 78;
 
-        CreateWindowExW(0, L"STATIC", L"我常听的",
+        ctx->hLabelPlay = CreateWindowExW(0, L"STATIC", L"我常听的",
             WS_CHILD | WS_VISIBLE, 15, yPos, 180, 20, hDlg, NULL, m_hInst, NULL);
 
         yPos += 20;
@@ -2160,6 +2168,9 @@ private:
         EnableWindow(m_btnNext,  hasItems);
         EnableWindow(m_trackSeek, loaded);
         EnableWindow(m_sliderVol, loaded);
+        if (loaded) {
+            SetWindowTextW(m_btnPlay, m_audio.IsPlaying() ? L"⏸" : L"▶");
+        }
         UpdateModeUI();
         UpdateVolLabel();
         if (!loaded) {
@@ -2894,8 +2905,11 @@ static void LayoutStatsControls(StatsDlgCtx* c, int clientW, int clientH) {
     int listW = (clientW > margin * 2) ? clientW - margin * 2 : 200;
 
     SetWindowPos(c->hDayList, NULL, margin, c->yDayList, listW, newDayH, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(c->hLabelDay, NULL, margin, c->yDayList - 20, listW, 20, SWP_NOZORDER | SWP_NOACTIVATE);
     SetWindowPos(c->hWeekList, NULL, margin, c->yWeekList + shiftDay, listW, newWeekH, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(c->hLabelWeek, NULL, margin, c->yWeekList + shiftDay - 20, listW, 20, SWP_NOZORDER | SWP_NOACTIVATE);
     SetWindowPos(c->hPlayCountList, NULL, margin, c->yPlayList + shiftWeek, listW, newPlayH, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(c->hLabelPlay, NULL, margin, c->yPlayList + shiftWeek - 20, listW, 20, SWP_NOZORDER | SWP_NOACTIVATE);
     SetWindowPos(c->hTotalText, NULL, margin, c->yTotal + extraH, listW, 22, SWP_NOZORDER | SWP_NOACTIVATE);
 
     int btnY = c->yButtons + extraH;

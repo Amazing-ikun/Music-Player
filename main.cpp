@@ -2046,12 +2046,17 @@ private:
         // Store MainWindow pointer for potential use
         SetWindowLongPtrW(hDlg, GWLP_USERDATA, (LONG_PTR)this);
 
+        // Use Microsoft YaHei explicitly so the EDIT control has accurate
+        // metrics for CJK text.  Using NULL as typeface lets the font mapper
+        // pick a default that lacks CJK glyphs, forcing font linking — the
+        // linked CJK font's real glyph extent can exceed tmHeight reported
+        // by the base font, clipping character bottoms on every visible row.
         HFONT hGuiFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, NULL);
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei");
         HFONT hTitleFont = CreateFontW(-18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, NULL);
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei");
 
         // Get actual client area — title bar height varies by Windows version/DPI
         RECT cr;
@@ -2105,9 +2110,9 @@ private:
         SendMessageW(hChangelog, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
 
         // Snap the internal formatting rectangle height to an exact multiple
-        // of lineH, so every visible row has room for descenders and CJK
-        // glyphs without clipping.  EM_GETRECT returns the rect that already
-        // accounts for WS_EX_CLIENTEDGE border thickness (varies by theme).
+        // of lineH, so no partial row remains at the bottom of the control.
+        // EM_GETRECT returns the rect that already accounts for WS_EX_CLIENTEDGE
+        // border thickness (varies by theme).
         RECT fmt;
         SendMessageW(hChangelog, EM_GETRECT, 0, (LPARAM)&fmt);
         int fmtH = fmt.bottom - fmt.top;
@@ -2209,8 +2214,6 @@ private:
 
 
     // Listening time tracking
-
-
     void StartListening() {
         if (!m_listening) {
             m_listening = true;
@@ -2230,7 +2233,6 @@ private:
 
 
     // Play file
-
     void PlayFile(int index) {
         if (index < 0 || index >= m_playlist.GetCount()) return;
 

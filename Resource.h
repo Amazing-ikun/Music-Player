@@ -45,6 +45,7 @@ constexpr int ID_SPEED_CUSTOM      = 2026;
 constexpr int ID_STARTUP_NOTHING   = 2027;
 constexpr int ID_STARTUP_AUTOPLAY  = 2028;
 constexpr int ID_UNDO_REMOVE       = 2029;
+constexpr int ID_SETTINGS_ABOUT    = 2030;
 
 // Custom Window Messages
 constexpr UINT WM_USER_SONG_END    = WM_USER + 100;

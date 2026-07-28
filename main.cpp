@@ -3,6 +3,29 @@
 #define _UNICODE
 #include <windows.h>
 #include <commctrl.h>
+
+// MusicPlayer version
+static const wchar_t* APP_VERSION = L"1.0.0";
+
+// Changelog — shown in the About dialog
+static const wchar_t* CHANGELOG =
+    L"v1.0.0\n"
+    L"  - 添加定时刷写听歌历史，防止直接关机丢失数据\n"
+    L"  - 添加关于对话框\n"
+    L"\n"
+    L"v0.9.0 (previous)\n"
+    L"  - 添加 ID3 标签读取、搜索、撤销删除\n"
+    L"  - 修复托盘图标显示\n"
+    L"  - 添加日历日期范围选择\n"
+    L"  - 修复暂停淡出效果的 bug\n"
+    L"  - 添加单实例检查\n"
+    L"  - 暂停时添加淡出效果 (BASS_ChannelSlideAttribute)\n"
+    L"  - 变速播放 (0.1x - 10x) 支持\n"
+    L"  - 添加 \"我常听的\" 播放次数统计\n"
+    L"  - 鼠标滚轮调节音量\n"
+    L"  - 播放模式支持顺序播放、单曲循环、随机播放\n"
+    L"  - 窗口比例缩放自适应\n";
+
 #include <commdlg.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -222,6 +245,7 @@ struct StatsDlgCtx {
 };
 static LRESULT CALLBACK StatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
 static LRESULT CALLBACK SpeedInputDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
+static LRESULT CALLBACK AboutDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
 static void LayoutStatsControls(StatsDlgCtx* c, int clientW, int clientH);
 
 // MainWindow
@@ -566,6 +590,8 @@ private:
         AppendMenuW(m_settingsMenu, MF_STRING, ID_SETTINGS_HOTKEYS,
             L"配置快捷键...");
         AppendMenuW(m_settingsMenu, MF_STRING, ID_SETTINGS_STATS, L"统计");
+        AppendMenuW(m_settingsMenu, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(m_settingsMenu, MF_STRING, ID_SETTINGS_ABOUT, L"关于...");
         AppendMenuW(bar, MF_POPUP, (UINT_PTR)m_settingsMenu, L"设置(&S)");
 
         SetMenu(m_hwnd, bar);
@@ -774,6 +800,9 @@ private:
                     break;
                 case ID_SETTINGS_STATS:
                     ShowStatsWindow();
+                    break;
+                case ID_SETTINGS_ABOUT:
+                    ShowAboutWindow();
                     break;
                 case ID_PLAY_SEQUENTIAL: SetPlayMode(PlayMode::Sequential); break;
                 case ID_PLAY_REPEATONE:  SetPlayMode(PlayMode::RepeatOne);  break;
@@ -1991,6 +2020,72 @@ private:
         DeleteObject(hGuiFont);
     }
 
+    void ShowAboutWindow() {
+        const wchar_t ABOUT_CLASS[] = L"AboutWindow";
+        WNDCLASSEXW wc = {};
+        wc.cbSize        = sizeof(wc);
+        wc.style         = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc   = AboutDlgProc;
+        wc.hInstance     = m_hInst;
+        wc.hIcon         = LoadIconW(m_hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
+        wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = ABOUT_CLASS;
+        RegisterClassExW(&wc);
+
+        int dlgW = 420, dlgH = 380;
+        int sw = GetSystemMetrics(SM_CXSCREEN);
+        int sh = GetSystemMetrics(SM_CYSCREEN);
+        int x = (sw - dlgW) / 2, y = (sh - dlgH) / 2;
+
+        HWND hDlg = CreateWindowExW(0, ABOUT_CLASS, L"关于 MusicPlayer",
+            WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+            x, y, dlgW, dlgH, m_hwnd, NULL, m_hInst, NULL);
+        if (!hDlg) return;
+
+        // Store MainWindow pointer for potential use
+        SetWindowLongPtrW(hDlg, GWLP_USERDATA, (LONG_PTR)this);
+
+        HFONT hGuiFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, NULL);
+        HFONT hTitleFont = CreateFontW(-18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, NULL);
+
+        // App title
+        HWND hTitle = CreateWindowExW(0, L"STATIC", L"MusicPlayer",
+            WS_CHILD | WS_VISIBLE, 20, 15, dlgW - 40, 28, hDlg, NULL, m_hInst, NULL);
+        SendMessageW(hTitle, WM_SETFONT, (WPARAM)hTitleFont, TRUE);
+
+        // Version string
+        wchar_t verBuf[64];
+        swprintf(verBuf, 64, L"版本: %ls", APP_VERSION);
+        HWND hVer = CreateWindowExW(0, L"STATIC", verBuf,
+            WS_CHILD | WS_VISIBLE, 20, 48, dlgW - 40, 20, hDlg, NULL, m_hInst, NULL);
+        SendMessageW(hVer, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
+
+        // Changelog label
+        CreateWindowExW(0, L"STATIC", L"更新历史:",
+            WS_CHILD | WS_VISIBLE, 20, 75, 100, 16, hDlg, NULL, m_hInst, NULL);
+
+        // Changelog text (read-only, multiline edit with scrollbar)
+        HWND hChangelog = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", CHANGELOG,
+            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY |
+            ES_AUTOVSCROLL | WS_VSCROLL | ES_LEFT,
+            20, 95, dlgW - 40, dlgH - 155, hDlg, NULL, m_hInst, NULL);
+        SendMessageW(hChangelog, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
+        SendMessageW(hChangelog, EM_SETSEL, 0, 0);
+
+        // Close button
+        CreateWindowExW(0, L"BUTTON", L"确定",
+            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            dlgW / 2 - 40, dlgH - 48, 80, 28, hDlg, (HMENU)IDOK, m_hInst, NULL);
+
+        DeleteObject(hTitleFont);
+        DeleteObject(hGuiFont);
+    }
+
     void RefreshStatsDisplay(StatsDlgCtx* ctx) {
         time_t now_t = time(NULL);
         struct tm tm_now = *localtime(&now_t);
@@ -3075,6 +3170,18 @@ static LRESULT CALLBACK SpeedInputDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM
             DestroyWindow(hDlg);
             return 0;
         }
+    }
+    return DefWindowProcW(hDlg, msg, wp, lp);
+}
+
+static LRESULT CALLBACK AboutDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_CLOSE) {
+        DestroyWindow(hDlg);
+        return 0;
+    }
+    if (msg == WM_COMMAND && LOWORD(wp) == IDOK) {
+        DestroyWindow(hDlg);
+        return 0;
     }
     return DefWindowProcW(hDlg, msg, wp, lp);
 }

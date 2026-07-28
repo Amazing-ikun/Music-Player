@@ -2047,10 +2047,10 @@ private:
         SetWindowLongPtrW(hDlg, GWLP_USERDATA, (LONG_PTR)this);
 
         HFONT hGuiFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, NULL);
         HFONT hTitleFont = CreateFontW(-18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, NULL);
 
         // Get actual client area — title bar height varies by Windows version/DPI
@@ -2058,6 +2058,17 @@ private:
         GetClientRect(hDlg, &cr);
         int clientW = cr.right;
         int clientH = cr.bottom;
+
+        // Query font line height so we can size the edit control to an exact
+        // multiple, avoiding clipped descenders on the last visible row.
+        HDC hdc = GetDC(hDlg);
+        HFONT hOldFont = (HFONT)SelectObject(hdc, hGuiFont);
+        TEXTMETRICW tm;
+        GetTextMetricsW(hdc, &tm);
+        SelectObject(hdc, hOldFont);
+        ReleaseDC(hDlg, hdc);
+        int lineH = tm.tmHeight;               // ascent + descent (logical units)
+        int borderLoss = 4;                    // WS_EX_CLIENTEDGE ~2 px per side
 
         // Close button: at the bottom center, 12px from client edge
         const int btnW = 80, btnH = 28, marginX = 20, gap = 12;
@@ -2067,6 +2078,8 @@ private:
         int labelY = 75;
         int editY = 95;
         int editH = btnY - gap - editY;
+        // Snap edit height to an exact multiple of line height
+        editH = ((editH - borderLoss) / lineH) * lineH + borderLoss;
 
         // App title
         HWND hTitle = CreateWindowExW(0, L"STATIC", L"MusicPlayer",

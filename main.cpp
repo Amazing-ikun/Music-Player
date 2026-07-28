@@ -9,22 +9,22 @@ static const wchar_t* APP_VERSION = L"1.0.0";
 
 // Changelog — shown in the About dialog
 static const wchar_t* CHANGELOG =
-    L"v1.0.0\n"
-    L"  - 添加定时刷写听歌历史，防止直接关机丢失数据\n"
-    L"  - 添加关于对话框\n"
-    L"\n"
-    L"v0.9.0 (previous)\n"
-    L"  - 添加 ID3 标签读取、搜索、撤销删除\n"
-    L"  - 修复托盘图标显示\n"
-    L"  - 添加日历日期范围选择\n"
-    L"  - 修复暂停淡出效果的 bug\n"
-    L"  - 添加单实例检查\n"
-    L"  - 暂停时添加淡出效果 (BASS_ChannelSlideAttribute)\n"
-    L"  - 变速播放 (0.1x - 10x) 支持\n"
-    L"  - 添加 \"我常听的\" 播放次数统计\n"
-    L"  - 鼠标滚轮调节音量\n"
-    L"  - 播放模式支持顺序播放、单曲循环、随机播放\n"
-    L"  - 窗口比例缩放自适应\n";
+    L"v1.0.0\r\n"
+    L"  - 添加定时刷写听歌历史，防止直接关机丢失数据\r\n"
+    L"  - 添加关于对话框\r\n"
+    L"\r\n"
+    L"v0.9.0 (previous)\r\n"
+    L"  - 添加 ID3 标签读取、搜索、撤销删除\r\n"
+    L"  - 修复托盘图标显示\r\n"
+    L"  - 添加日历日期范围选择\r\n"
+    L"  - 修复暂停淡出效果的 bug\r\n"
+    L"  - 添加单实例检查\r\n"
+    L"  - 暂停时添加淡出效果 (BASS_ChannelSlideAttribute)\r\n"
+    L"  - 变速播放 (0.1x - 10x) 支持\r\n"
+    L"  - 添加 \"我常听的\" 播放次数统计\r\n"
+    L"  - 鼠标滚轮调节音量\r\n"
+    L"  - 播放模式支持顺序播放、单曲循环、随机播放\r\n"
+    L"  - 窗口比例缩放自适应\r\n";
 
 #include <commdlg.h>
 #include <shellapi.h>
@@ -3197,6 +3197,12 @@ static LRESULT CALLBACK SpeedInputDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM
 static LRESULT CALLBACK AboutDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_CLOSE) {
         DestroyWindow(hDlg);
+        return 0;
+    }
+    if (msg == WM_DESTROY) {
+        HWND hOwner = GetWindow(hDlg, GW_OWNER);
+        if (hOwner && IsWindow(hOwner))
+            PostMessage(hOwner, WM_APP_BRING_TO_TOP, 0, 0);
         return 0;
     }
     if (msg == WM_COMMAND && LOWORD(wp) == IDOK) {

@@ -5,10 +5,13 @@
 #include <commctrl.h>
 
 // MusicPlayer version
-static const wchar_t* APP_VERSION = L"1.0.1";
+static const wchar_t* APP_VERSION = L"1.1.0";
 
 // Changelog — shown in the About dialog
 static const wchar_t* CHANGELOG =
+    L"v1.1.0\r\n"
+    L"  - 音量条左侧添加喇叭静音按钮（点击静音，再次点击恢复原音量）\r\n"
+    L"\r\n"
     L"v1.0.1\r\n"
     L"  - 修复关于对话框文本底部裁剪（指定 Microsoft YaHei 字体消除字体链接偏差）\r\n"
     L"  - 修复关于对话框更新日志文本换行（\\n → \\r\\n）\r\n"
@@ -260,7 +263,9 @@ public:
         : m_hwnd(NULL), m_hInst(NULL)
         , m_playlistLV(NULL), m_searchEdit(NULL)
         , m_btnPrev(NULL), m_btnPlay(NULL), m_btnNext(NULL), m_btnMode(NULL), m_btnLocate(NULL)
+        , m_btnMute(NULL)
         , m_trackSeek(NULL), m_sliderVol(NULL), m_staticVolPct(NULL)
+        , m_lastVol(80)
         , m_staticTime(NULL), m_staticSong(NULL)
         , m_currentIndex(-1), m_userDraggingSeek(false)
         , m_sortColumn(-1), m_sortAscending(true)
@@ -328,6 +333,7 @@ private:
     HWND m_playlistLV;
     HWND m_searchEdit;
     HWND m_btnPrev, m_btnPlay, m_btnNext, m_btnMode, m_btnLocate;
+    HWND m_btnMute;
     HWND m_trackSeek, m_sliderVol, m_staticVolPct;
     HWND m_staticTime, m_staticSong;
     HWND m_ctrlPanel;
@@ -336,6 +342,7 @@ private:
     AudioEngine      m_audio;
     PlaylistManager  m_playlist;
     int              m_currentIndex;
+    int              m_lastVol;   // volume restored on unmute
     bool             m_userDraggingSeek;
     int              m_sortColumn;
     bool             m_sortAscending;
@@ -657,6 +664,10 @@ private:
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             0, 0, 0, 0, m_hwnd, (HMENU)IDC_BTN_LOCATE, m_hInst, NULL);
 
+        m_btnMute = CreateWindowExW(0, L"BUTTON", L"🔊",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            0, 0, 0, 0, m_hwnd, (HMENU)IDC_BTN_MUTE, m_hInst, NULL);
+
         m_staticVolPct = CreateWindowExW(0, L"STATIC", L"80%",
             WS_CHILD | WS_VISIBLE | SS_CENTER,
             0, 0, 0, 0, m_hwnd, (HMENU)IDC_STAT_VOL, m_hInst, NULL);
@@ -682,7 +693,7 @@ private:
             WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
             0, 0, 0, 0, m_hwnd, (HMENU)IDC_STAT_SONG, m_hInst, NULL);
 
-        HWND ctls[] = { m_btnMode, m_btnPrev, m_btnPlay, m_btnNext, m_btnLocate,
+        HWND ctls[] = { m_btnMode, m_btnPrev, m_btnPlay, m_btnNext, m_btnLocate, m_btnMute,
                         m_sliderVol, m_trackSeek, m_staticVolPct,
                         m_staticTime, m_staticSong };
         for (auto c : ctls) SendMessageW(c, WM_SETFONT, (WPARAM)m_hFont, TRUE);
@@ -734,11 +745,13 @@ private:
         bx += 42;
         SetWindowPos(m_btnLocate, NULL, bx, y + 4, 36, BH, SWP_NOZORDER);
 
+        int muteW = 26;
         int volPctW = 36;
         int volW = 130;
-        int volX = w - M - volPctW - volW;
-        SetWindowPos(m_staticVolPct, NULL, volX, y + 6, volPctW, 20, SWP_NOZORDER);
-        SetWindowPos(m_sliderVol, NULL, volX + volPctW, y + 4, volW, BH, SWP_NOZORDER);
+        int volX = w - M - volPctW - volW - muteW - 4;
+        SetWindowPos(m_btnMute, NULL, volX, y + 4, muteW, BH, SWP_NOZORDER);
+        SetWindowPos(m_staticVolPct, NULL, volX + muteW + 4, y + 6, volPctW, 20, SWP_NOZORDER);
+        SetWindowPos(m_sliderVol, NULL, volX + muteW + 4 + volPctW, y + 4, volW, BH, SWP_NOZORDER);
 
         y += BH + 6;
         SetWindowPos(m_trackSeek, NULL, M, y + 2, w - 2 * M, 24, SWP_NOZORDER);
@@ -847,6 +860,7 @@ private:
                 else if (hCtrl == m_btnNext) OnNext();
                 else if (hCtrl == m_btnMode) OnCycleMode();
                 else if (hCtrl == m_btnLocate) LocateCurrentSong();
+                else if (hCtrl == m_btnMute) ToggleMute();
             } else if (code == EN_CHANGE && hCtrl == m_searchEdit) {
                 OnSearchChanged();
             }
@@ -2311,6 +2325,7 @@ private:
         EnableWindow(m_btnNext,  hasItems);
         EnableWindow(m_trackSeek, loaded);
         EnableWindow(m_sliderVol, loaded);
+        EnableWindow(m_btnMute, loaded);
         if (loaded) {
             SetWindowTextW(m_btnPlay, m_audio.IsPlaying() ? L"⏸" : L"▶");
         }
@@ -2341,6 +2356,21 @@ private:
         wchar_t buf[16];
         swprintf(buf, 16, L"%d%%", vol);
         SetWindowTextW(m_staticVolPct, buf);
+        if (m_btnMute) SetWindowTextW(m_btnMute, vol == 0 ? L"🔇" : L"🔊");
+    }
+
+    void ToggleMute() {
+        int vol = (int)SendMessageW(m_sliderVol, TBM_GETPOS, 0, 0);
+        if (vol > 0) {
+            m_lastVol = vol;
+            vol = 0;
+        } else {
+            if (m_lastVol <= 0) m_lastVol = 80;
+            vol = m_lastVol;
+        }
+        m_audio.SetVolume(vol);
+        SendMessageW(m_sliderVol, TBM_SETPOS, TRUE, vol);
+        UpdateVolLabel();
     }
 
     void UpdateSeekDisplay() {

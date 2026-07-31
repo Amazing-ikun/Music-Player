@@ -43,7 +43,10 @@ set(SOURCES
     app.rc
 )
 
-add_executable(MusicPlayer WIN32 ${SOURCES})
+add_executable(MusicPlayer WIN32 ${SOURCES} icon.ico)
+
+# Ensure resource recompilation when icon changes
+set_source_files_properties(app.rc PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/icon.ico")
 
 # MSVC: UTF-8 source encoding (supports Chinese chars in string literals)
 if (MSVC)

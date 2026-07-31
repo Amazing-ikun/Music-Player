@@ -14,6 +14,7 @@ constexpr int IDC_STAT_SONG        = 1009;
 constexpr int IDC_STAT_VOL         = 1010;
 constexpr int IDC_CTRL_PANEL       = 1012;
 constexpr int IDC_BTN_LOCATE       = 1013;
+constexpr int IDC_BTN_MUTE         = 1014;
 
 // Menu Command IDs
 constexpr int ID_FILE_OPENFOLDER   = 2001;

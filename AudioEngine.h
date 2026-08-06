@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <map>
 #include <windows.h>
 #include <bass.h>
 #include <bass_fx.h>
@@ -69,6 +70,12 @@ public:
     void SetVolume(int volume);
     int GetVolume() const { return m_volume; }
 
+    // 音量平衡: 按歌曲响度归一化, 使不同歌曲听感音量相近
+    void SetBalanceEnabled(bool enabled);
+    bool IsBalanceEnabled() const { return m_balanceEnabled; }
+    // 重新测量并应用当前歌曲的平衡增益 (测量结果会写入 .loudness.txt 缓存)
+    void ApplyBalance();
+
     // 进度 (秒)
     double GetPosition() const;
     double GetLength() const;
@@ -108,6 +115,25 @@ private:
     HSTREAM m_stream;       // BASS 音频流句柄
     HSYNC   m_endSync;      // 结束同步器句柄
     int     m_volume;       // 音量 0-100
+
+    // ---- 音量平衡 ----
+    bool        m_balanceEnabled;   // 是否启用音量平衡
+    float       m_songGain;         // 当前歌曲的平衡增益 (线性 0~1, 乘在单曲音量上)
+    std::wstring m_currentPath;     // 当前已加载歌曲路径
+
+    struct LoudnessEntry {
+        double    lufs;             // 集成响度 (LUFS, 负数)
+        ULONGLONG size;             // 文件大小, 用于缓存失效判断
+        FILETIME  mtime;            // 文件修改时间, 用于缓存失效判断
+    };
+    std::map<std::wstring, LoudnessEntry> m_loudnessCache;  // 路径 → 响度缓存
+    bool m_cacheLoaded;
+
+    void LoadLoudnessCache();
+    void SaveLoudnessCache();
+    double MeasureLoudnessLUFS(const std::wstring& filePath);
+    double GetLoudnessLUFS(const std::wstring& filePath);
+    float ComputeGainFromLUFS(double lufs);
     bool    m_playing;      // 是否正在播放
     bool    m_paused;       // 是否已暂停
     PlayMode m_playMode;    // 当前播放模式

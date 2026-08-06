@@ -5,10 +5,18 @@
 #include <commctrl.h>
 
 // MusicPlayer version
-static const wchar_t* APP_VERSION = L"1.1.0";
+static const wchar_t* APP_VERSION = L"1.2.0";
 
 // Changelog — shown in the About dialog
 static const wchar_t* CHANGELOG =
+    L"v1.2.1\r\n"
+    L"  - 「关于 MusicPlayer」窗口现在支持自由拉伸,并限定了最大尺寸\r\n"
+    L"\r\n"
+    L"v1.2.0\r\n"
+    L"  - 新增“音量平衡”功能（设置 → 音量平衡）：自动分析每首歌曲响度并统一音量，无需手动调节\r\n"
+    L"  - 响度分析结果缓存至 .loudness.txt，分析过的歌曲再次播放即时生效\r\n"
+    L"  - 修正音量刻度（消除全局音量与单曲音量的双重衰减，显示 80% 即为真实 80%）\r\n"
+    L"\r\n"
     L"v1.1.0\r\n"
     L"  - 音量条左侧添加喇叭静音按钮（点击静音，再次点击恢复原音量）\r\n"
     L"\r\n"
@@ -60,6 +68,12 @@ namespace {
     constexpr int MIN_H = 400;
     constexpr int SEEK_RES = 10000;
     constexpr int LV_ROW_HEIGHT = 36;
+
+    // 关于对话框尺寸: 默认/最小 = 420x380, 最大拉伸上限 = 800x640
+    constexpr int ABOUT_MIN_W = 420;
+    constexpr int ABOUT_MIN_H = 380;
+    constexpr int ABOUT_MAX_W = 800;
+    constexpr int ABOUT_MAX_H = 640;
 }
 
 static std::wstring FormatTime(double seconds) {
@@ -256,6 +270,47 @@ static LRESULT CALLBACK SpeedInputDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM
 static LRESULT CALLBACK AboutDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
 static void LayoutStatsControls(StatsDlgCtx* c, int clientW, int clientH);
 
+// 关于对话框子控件与上下文
+struct AboutCtx {
+    HWND hDlg;
+    HFONT hGuiFont;     // 正文/编辑框字体
+    HFONT hTitleFont;   // 标题字体
+    HWND hTitle;
+    HWND hVersion;
+    HWND hChangelogLabel;
+    HWND hChangelog;
+    HWND hClose;
+    int lineH;          // 编辑框行高, 用于格式矩形对齐
+};
+
+// 根据当前客户区大小布局关于对话框子控件 (创建时与 WM_SIZE 时调用)
+static void LayoutAboutControls(AboutCtx* ctx) {
+    if (!ctx->hChangelog) return;
+    RECT cr;
+    GetClientRect(ctx->hDlg, &cr);
+    int clientW = cr.right, clientH = cr.bottom;
+
+    const int marginX = 20, gap = 12;
+    const int btnW = 80, btnH = 28;
+    int btnY = clientH - btnH - gap;
+    int editY = 95;
+    int editH = btnY - gap - editY;
+
+    MoveWindow(ctx->hTitle, marginX, 15, clientW - marginX * 2, 28, TRUE);
+    MoveWindow(ctx->hVersion, marginX, 48, clientW - marginX * 2, 20, TRUE);
+    MoveWindow(ctx->hChangelogLabel, marginX, 75, 100, 16, TRUE);
+    MoveWindow(ctx->hChangelog, marginX, editY, clientW - marginX * 2, editH, TRUE);
+    MoveWindow(ctx->hClose, clientW / 2 - btnW / 2, btnY, btnW, btnH, TRUE);
+
+    // 将编辑框内部格式矩形对齐到 lineH 整数倍, 避免底部出现被裁剪的半行
+    RECT fmt;
+    SendMessageW(ctx->hChangelog, EM_GETRECT, 0, (LPARAM)&fmt);
+    int fmtH = fmt.bottom - fmt.top;
+    fmt.bottom = fmt.top + (fmtH / ctx->lineH) * ctx->lineH;
+    SendMessageW(ctx->hChangelog, EM_SETRECT, 0, (LPARAM)&fmt);
+    InvalidateRect(ctx->hChangelog, NULL, TRUE);
+}
+
 // MainWindow
 class MainWindow {
 public:
@@ -272,6 +327,7 @@ public:
         , m_shufflePos(0)
         , m_settingsAutoplay(1), m_settingsRememberProgress(true)
         , m_settingsTray(true), m_trayIconAdded(false)
+        , m_balanceEnabled(true)
         , m_ctrlPanel(NULL)
         , m_listening(false), m_saveTick(0), m_nextScheduled(-1)
         , m_undoValid(false)
@@ -357,6 +413,7 @@ private:
     bool m_settingsRememberProgress;
     bool m_settingsTray;
     bool m_trayIconAdded;
+    bool m_balanceEnabled;   // 音量平衡
 
     // ---- Hotkeys ----
     HotkeyBinding m_hotkeys[7];
@@ -471,6 +528,8 @@ private:
 
         LoadPlayCount();
         LoadSettings();
+        // 同步音量平衡开关: 老版本 .settings.txt 无此字段时, 以 MainWindow 默认值 (开启) 为准
+        m_audio.SetBalanceEnabled(m_balanceEnabled);
         UpdateSettingsMenu();
         UpdateModeUI();
         UpdateSpeedMenu();
@@ -489,6 +548,9 @@ private:
         bool startPlay = (m_settingsAutoplay == 1);
         if (m_settingsRememberProgress && !m_playlist.IsEmpty()) {
             if (LoadLastSong()) {
+                if (m_audio.IsBalanceEnabled()) {
+                    m_audio.ApplyBalance();
+                }
                 // Stream loaded and seeked, now start playback if configured.
                 if (startPlay) {
                     m_audio.Play();
@@ -577,6 +639,8 @@ private:
             L"记住播放进度");
         AppendMenuW(m_settingsMenu, MF_STRING | MF_CHECKED, ID_SETTINGS_TRAY,
             L"最小化到托盘");
+        AppendMenuW(m_settingsMenu, MF_STRING | MF_CHECKED, ID_SETTINGS_BALANCE,
+            L"音量平衡(&B)");
         AppendMenuW(m_settingsMenu, MF_SEPARATOR, 0, NULL);
 
         m_playSubMenu = CreatePopupMenu();
@@ -812,6 +876,12 @@ private:
                 case ID_SETTINGS_TRAY:
                     m_settingsTray = !m_settingsTray;
                     UpdateSettingsMenu();
+                    break;
+                case ID_SETTINGS_BALANCE:
+                    m_balanceEnabled = !m_balanceEnabled;
+                    m_audio.SetBalanceEnabled(m_balanceEnabled);
+                    UpdateSettingsMenu();
+                    SaveSettings();
                     break;
                 case ID_SETTINGS_HOTKEYS:
                     ShowHotkeyDialog();
@@ -1534,6 +1604,8 @@ private:
             MF_BYCOMMAND | (m_settingsRememberProgress ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(m_settingsMenu, ID_SETTINGS_TRAY,
             MF_BYCOMMAND | (m_settingsTray ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(m_settingsMenu, ID_SETTINGS_BALANCE,
+            MF_BYCOMMAND | (m_balanceEnabled ? MF_CHECKED : MF_UNCHECKED));
     }
 
 
@@ -2052,103 +2124,71 @@ private:
         wc.lpszClassName = ABOUT_CLASS;
         RegisterClassExW(&wc);
 
-        int dlgW = 420, dlgH = 380;
+        int dlgW = ABOUT_MIN_W, dlgH = ABOUT_MIN_H;
         int sw = GetSystemMetrics(SM_CXSCREEN);
         int sh = GetSystemMetrics(SM_CYSCREEN);
         int x = (sw - dlgW) / 2, y = (sh - dlgH) / 2;
 
+        // 支持用户拉伸 (WS_THICKFRAME), 尺寸上下限由 WM_GETMINMAXINFO 限制
         HWND hDlg = CreateWindowExW(0, ABOUT_CLASS, L"关于 MusicPlayer",
-            WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+            WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MAXIMIZEBOX,
             x, y, dlgW, dlgH, m_hwnd, NULL, m_hInst, NULL);
         if (!hDlg) return;
 
-        // Store MainWindow pointer for potential use
-        SetWindowLongPtrW(hDlg, GWLP_USERDATA, (LONG_PTR)this);
+        AboutCtx* ctx = new AboutCtx{};
+        ctx->hDlg = hDlg;
+        SetWindowLongPtrW(hDlg, GWLP_USERDATA, (LONG_PTR)ctx);
 
         // Use Microsoft YaHei explicitly so the EDIT control has accurate
         // metrics for CJK text.  Using NULL as typeface lets the font mapper
         // pick a default that lacks CJK glyphs, forcing font linking — the
         // linked CJK font's real glyph extent can exceed tmHeight reported
         // by the base font, clipping character bottoms on every visible row.
-        HFONT hGuiFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        ctx->hGuiFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei");
-        HFONT hTitleFont = CreateFontW(-18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        ctx->hTitleFont = CreateFontW(-18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei");
 
-        // Get actual client area — title bar height varies by Windows version/DPI
-        RECT cr;
-        GetClientRect(hDlg, &cr);
-        int clientW = cr.right;
-        int clientH = cr.bottom;
-
-        // Query font line height
+        // Query font line height (ascent + descent in logical units)
         HDC hdc = GetDC(hDlg);
-        HFONT hOldFont = (HFONT)SelectObject(hdc, hGuiFont);
+        HFONT hOldFont = (HFONT)SelectObject(hdc, ctx->hGuiFont);
         TEXTMETRICW tm;
         GetTextMetricsW(hdc, &tm);
         SelectObject(hdc, hOldFont);
         ReleaseDC(hDlg, hdc);
-        int lineH = tm.tmHeight;               // ascent + descent (logical units)
+        ctx->lineH = tm.tmHeight;
 
-        // Close button: at the bottom center, 12px from client edge
-        const int btnW = 80, btnH = 28, marginX = 20, gap = 12;
-        int btnY = clientH - btnH - gap;
+        // 子控件位置统一由 LayoutAboutControls 计算
+        ctx->hTitle = CreateWindowExW(0, L"STATIC", L"MusicPlayer",
+            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hDlg, NULL, m_hInst, NULL);
+        SendMessageW(ctx->hTitle, WM_SETFONT, (WPARAM)ctx->hTitleFont, TRUE);
 
-        // Changelog: fill space between version line and close button
-        int labelY = 75;
-        int editY = 95;
-        int editH = btnY - gap - editY;
-
-        // App title
-        HWND hTitle = CreateWindowExW(0, L"STATIC", L"MusicPlayer",
-            WS_CHILD | WS_VISIBLE, marginX, 15, clientW - marginX * 2, 28,
-            hDlg, NULL, m_hInst, NULL);
-        SendMessageW(hTitle, WM_SETFONT, (WPARAM)hTitleFont, TRUE);
-
-        // Version string
         wchar_t verBuf[64];
         swprintf(verBuf, 64, L"版本: %ls", APP_VERSION);
-        HWND hVer = CreateWindowExW(0, L"STATIC", verBuf,
-            WS_CHILD | WS_VISIBLE, marginX, 48, clientW - marginX * 2, 20,
-            hDlg, NULL, m_hInst, NULL);
-        SendMessageW(hVer, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
+        ctx->hVersion = CreateWindowExW(0, L"STATIC", verBuf,
+            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hDlg, NULL, m_hInst, NULL);
+        SendMessageW(ctx->hVersion, WM_SETFONT, (WPARAM)ctx->hGuiFont, TRUE);
 
-        // Changelog label
-        CreateWindowExW(0, L"STATIC", L"更新历史:",
-            WS_CHILD | WS_VISIBLE, marginX, labelY, 100, 16,
-            hDlg, NULL, m_hInst, NULL);
+        ctx->hChangelogLabel = CreateWindowExW(0, L"STATIC", L"更新历史:",
+            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hDlg, NULL, m_hInst, NULL);
+        SendMessageW(ctx->hChangelogLabel, WM_SETFONT, (WPARAM)ctx->hGuiFont, TRUE);
 
-        // Changelog text (read-only, multiline edit with scrollbar)
-        HWND hChangelog = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", CHANGELOG,
+        ctx->hChangelog = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", CHANGELOG,
             WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY |
             ES_AUTOVSCROLL | WS_VSCROLL | ES_LEFT,
-            marginX, editY, clientW - marginX * 2, editH,
-            hDlg, NULL, m_hInst, NULL);
-        SendMessageW(hChangelog, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
+            0, 0, 0, 0, hDlg, NULL, m_hInst, NULL);
+        SendMessageW(ctx->hChangelog, WM_SETFONT, (WPARAM)ctx->hGuiFont, TRUE);
+        SendMessageW(ctx->hChangelog, EM_SETSEL, 0, 0);
 
-        // Snap the internal formatting rectangle height to an exact multiple
-        // of lineH, so no partial row remains at the bottom of the control.
-        // EM_GETRECT returns the rect that already accounts for WS_EX_CLIENTEDGE
-        // border thickness (varies by theme).
-        RECT fmt;
-        SendMessageW(hChangelog, EM_GETRECT, 0, (LPARAM)&fmt);
-        int fmtH = fmt.bottom - fmt.top;
-        fmt.bottom = fmt.top + (fmtH / lineH) * lineH;
-        SendMessageW(hChangelog, EM_SETRECT, 0, (LPARAM)&fmt);
-        InvalidateRect(hChangelog, NULL, TRUE);
-
-        SendMessageW(hChangelog, EM_SETSEL, 0, 0);
-
-        // Close button
-        CreateWindowExW(0, L"BUTTON", L"确定",
+        ctx->hClose = CreateWindowExW(0, L"BUTTON", L"确定",
             WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            clientW / 2 - btnW / 2, btnY, btnW, btnH,
-            hDlg, (HMENU)IDOK, m_hInst, NULL);
+            0, 0, 0, 0, hDlg, (HMENU)IDOK, m_hInst, NULL);
+        SendMessageW(ctx->hClose, WM_SETFONT, (WPARAM)ctx->hGuiFont, TRUE);
 
-        DeleteObject(hTitleFont);
-        DeleteObject(hGuiFont);
+        LayoutAboutControls(ctx);
+        ShowWindow(hDlg, SW_SHOW);
     }
 
     void RefreshStatsDisplay(StatsDlgCtx* ctx) {
@@ -2271,6 +2311,9 @@ private:
         }
 
         m_currentIndex = index;
+        if (m_audio.IsBalanceEnabled()) {
+            m_audio.ApplyBalance();   // 首次播放该歌曲时测量响度, 之后命中缓存
+        }
         m_audio.Play();
         StartListening();
         m_playCount[path]++;
@@ -2528,12 +2571,13 @@ private:
         if (hFile == INVALID_HANDLE_VALUE) return;
         DWORD written;
         char buf[200];
-        int len = sprintf(buf, "autoplay=%d\nremember_progress=%d\ntray_minimize=%d\nplay_mode=%d\nplay_speed=%.2f\n",
+        int len = sprintf(buf, "autoplay=%d\nremember_progress=%d\ntray_minimize=%d\nplay_mode=%d\nplay_speed=%.2f\nloudness_balance=%d\n",
                           m_settingsAutoplay,
                           m_settingsRememberProgress ? 1 : 0,
                           m_settingsTray ? 1 : 0,
                           (int)m_audio.GetPlayMode(),
-                          m_audio.GetSpeed());
+                          m_audio.GetSpeed(),
+                          m_balanceEnabled ? 1 : 0);
         WriteFile(hFile, buf, (DWORD)len, &written, NULL);
         CloseHandle(hFile);
     }
@@ -2549,6 +2593,7 @@ private:
 
         DWORD size = GetFileSize(hFile, NULL);
         int mode = 0;
+        int balanceEnabled = 1;
         double speed = 1.0;
         if (size > 0 && size < 2048) {
             char buf[2048] = {};
@@ -2563,6 +2608,10 @@ private:
                     if (sscanf(p, "autoplay=%d", &m_settingsAutoplay) == 1) {}
                     else if (sscanf(p, "remember_progress=%d", &m_settingsRememberProgress) == 1) {}
                     else if (sscanf(p, "tray_minimize=%d", &m_settingsTray) == 1) {}
+                    else if (sscanf(p, "loudness_balance=%d", &balanceEnabled) == 1) {
+                        m_balanceEnabled = (balanceEnabled != 0);
+                        m_audio.SetBalanceEnabled(m_balanceEnabled);
+                    }
                     else if (sscanf(p, "play_mode=%d", &mode) == 1) {
                         if (mode >= 0 && mode <= 2) {
                             m_audio.SetPlayMode(static_cast<PlayMode>(mode));
@@ -3253,6 +3302,20 @@ static LRESULT CALLBACK SpeedInputDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM
 }
 
 static LRESULT CALLBACK AboutDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
+    AboutCtx* ctx = (AboutCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
+    if (msg == WM_GETMINMAXINFO) {
+        MINMAXINFO* mmi = (MINMAXINFO*)lp;
+        mmi->ptMinTrackSize.x = ABOUT_MIN_W;
+        mmi->ptMinTrackSize.y = ABOUT_MIN_H;
+        mmi->ptMaxTrackSize.x = ABOUT_MAX_W;
+        mmi->ptMaxTrackSize.y = ABOUT_MAX_H;
+        return 0;
+    }
+    // WM_SIZE 在 CreateWindowExW 期间可能早于 GWLP_USERDATA 设置, ctx 为空时跳过
+    if (msg == WM_SIZE && ctx) {
+        LayoutAboutControls(ctx);
+        return 0;
+    }
     if (msg == WM_CLOSE) {
         DestroyWindow(hDlg);
         return 0;
@@ -3261,6 +3324,12 @@ static LRESULT CALLBACK AboutDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) 
         HWND hOwner = GetWindow(hDlg, GW_OWNER);
         if (hOwner && IsWindow(hOwner))
             PostMessage(hOwner, WM_APP_BRING_TO_TOP, 0, 0);
+        if (ctx) {
+            if (ctx->hGuiFont)   DeleteObject(ctx->hGuiFont);
+            if (ctx->hTitleFont) DeleteObject(ctx->hTitleFont);
+            delete ctx;
+            SetWindowLongPtrW(hDlg, GWLP_USERDATA, 0);
+        }
         return 0;
     }
     if (msg == WM_COMMAND && LOWORD(wp) == IDOK) {

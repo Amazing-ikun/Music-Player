@@ -22,6 +22,7 @@ build/
 .lastsong.txt
 .history.txt
 .playcount.txt
+.loudness.txt
 .error.log
 .stats_export.json
 

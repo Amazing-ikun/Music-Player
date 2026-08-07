@@ -5,10 +5,13 @@
 #include <commctrl.h>
 
 // MusicPlayer version
-static const wchar_t* APP_VERSION = L"1.4.0";
+static const wchar_t* APP_VERSION = L"1.4.1";
 
 // Changelog — shown in the About dialog
 static const wchar_t* CHANGELOG =
+    L"v1.4.1\r\n"
+    L"  - 修复: 启动时缓存命中的歌曲时长仍显示 --:-- (改为先应用缓存再渲染列表)\r\n"
+    L"\r\n"
     L"v1.4.0\r\n"
     L"  - 歌曲时长缓存: 启动时先读本地 .durations.txt, 命中则直接显示具体时长, 否则仍为 --:--\r\n"
     L"  - 播放中或空闲时后台逐步扫描未知时长歌曲 (每 0.5 秒一首), 扫描结果即时刷新并写入缓存\r\n"
@@ -2643,6 +2646,9 @@ private:
     }
 
     void RefreshPlaylistUI() {
+        // 先应用缓存时长到数据模型, 再渲染列表行; 否则 UpdateLVItem 读到 0 会一直显示 --:--
+        ApplyDurationCache();
+
         SendMessageW(m_playlistLV, WM_SETREDRAW, FALSE, 0);
         ListView_DeleteAllItems(m_playlistLV);
 
@@ -2671,8 +2677,7 @@ private:
         SendMessageW(m_playlistLV, WM_SETREDRAW, TRUE, 0);
         InvalidateRect(m_playlistLV, NULL, TRUE);
 
-        // 歌单内容变化后: 应用缓存中的已知时长, 并将未知时长歌曲入队渐进扫描
-        ApplyDurationCache();
+        // 将真正未知时长 (未命中缓存) 的歌曲入队渐进扫描
         RebuildDurationScanQueue();
     }
 

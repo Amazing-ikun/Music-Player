@@ -23,6 +23,7 @@ build/
 .history.txt
 .playcount.txt
 .loudness.txt
+.durations.txt
 .error.log
 .stats_export.json
 

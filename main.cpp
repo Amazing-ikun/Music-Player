@@ -5,10 +5,21 @@
 #include <commctrl.h>
 
 // MusicPlayer version
-static const wchar_t* APP_VERSION = L"1.2.0";
+static const wchar_t* APP_VERSION = L"1.4.0";
 
 // Changelog — shown in the About dialog
 static const wchar_t* CHANGELOG =
+    L"v1.4.0\r\n"
+    L"  - 歌曲时长缓存: 启动时先读本地 .durations.txt, 命中则直接显示具体时长, 否则仍为 --:--\r\n"
+    L"  - 播放中或空闲时后台逐步扫描未知时长歌曲 (每 0.5 秒一首), 扫描结果即时刷新并写入缓存\r\n"
+    L"  - 缓存记录文件大小与修改时间, 歌曲被替换后自动重新测量\r\n"
+    L"\r\n"
+    L"v1.3.0\r\n"
+    L"  - 统计数据导出升级: 新增 CSV 格式, 可直接用 Excel 打开并可视化\r\n"
+    L"  - 导出前弹出选择窗口, 可勾选导出内容 (每日听歌记录/每周统计/常听歌曲排行/总计)\r\n"
+    L"  - 导出范围跟随统计窗口当前选中的日期区间\r\n"
+    L"  - 改为\"另存为\"对话框选择保存位置, 不再固定写到程序目录\r\n"
+    L"\r\n"
     L"v1.2.1\r\n"
     L"  - 「关于 MusicPlayer」窗口现在支持自由拉伸,并限定了最大尺寸\r\n"
     L"\r\n"
@@ -91,6 +102,24 @@ static std::wstring FormatTime(double seconds) {
 static std::wstring FormatDuration(double seconds) {
     if (seconds <= 0) return L"--:--";
     return FormatTime(seconds);
+}
+
+static std::string WideToUtf8(const std::wstring& ws) {
+    if (ws.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), (int)ws.size(), NULL, 0, NULL, NULL);
+    if (n <= 0) return {};
+    std::string out(n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), (int)ws.size(), &out[0], n, NULL, NULL);
+    return out;
+}
+
+static std::wstring Utf8ToWide(const std::string& s) {
+    if (s.empty()) return L"";
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, NULL, 0);
+    if (len <= 0) return L"";
+    std::wstring ws(len - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &ws[0], len);
+    return ws;
 }
 
 static std::wstring GetDisplayName(const std::wstring& path) {
@@ -265,10 +294,29 @@ struct StatsDlgCtx {
     HWND hDlg;
     bool dtpGuard; // guard against re-entrancy from DTM_SETSYSTEMTIME
 };
+// 统计数据导出对话框上下文
+struct ExportCtx {
+    HWND hDlg;
+    HWND hRadioCsv, hRadioJson;
+    HWND hChkDaily, hChkWeekly, hChkTop, hChkTotal;
+    bool asCsv;
+    bool includeDaily, includeWeekly, includeTopSongs, includeTotal;
+    int result;
+};
+static LRESULT CALLBACK ExportStatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
+
+// 时长缓存条目: 记录文件大小与修改时间用于缓存失效判断
+struct DurationCacheEntry {
+    double    duration;   // 秒
+    ULONGLONG size;
+    FILETIME  mtime;
+};
+
 static LRESULT CALLBACK StatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
 static LRESULT CALLBACK SpeedInputDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
 static LRESULT CALLBACK AboutDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
 static void LayoutStatsControls(StatsDlgCtx* c, int clientW, int clientH);
+static void ComputeStatsRange(const StatsDlgCtx* ctx, std::string& from, std::string& to);
 
 // 关于对话框子控件与上下文
 struct AboutCtx {
@@ -377,11 +425,6 @@ public:
         return true;
     }
 
-    // Public accessor for history export (used by visualization tools)
-    std::string ExportHistoryToJson(const std::string& from = "", const std::string& to = "") {
-        return m_history.GetExportData(from, to).ToJson();
-    }
-
 private:
     // ---- Controls ----
     HWND m_hwnd;
@@ -435,6 +478,11 @@ private:
     // ---- Play count tracking ----
     std::map<std::wstring, int> m_playCount;
 
+    // ---- Duration cache & progressive scan ----
+    std::map<std::wstring, DurationCacheEntry> m_durationCache;
+    bool m_durationCacheLoaded = false;
+    std::vector<int> m_pendingDurationScan;  // playlist indexes with unknown duration
+
     // ---- Undo remove ----
     SongInfo m_undoSong;
     int m_undoIndex;
@@ -471,7 +519,10 @@ private:
             case WM_COMMAND:           OnCommand(wp, lp);            return 0;
             case WM_HSCROLL:           OnHScroll(wp, lp);            return 0;
             case WM_MOUSEWHEEL:        OnMouseWheel(wp);             return 0;
-            case WM_TIMER:             if (wp == TIMER_ID_SEEK) OnTimer(); return 0;
+            case WM_TIMER:
+                if (wp == TIMER_ID_SEEK) OnTimer();
+                else if (wp == TIMER_ID_DURATION_SCAN) OnTimerDurationScan();
+                return 0;
             case WM_HOTKEY:            OnGlobalHotkey((int)wp);     return 0;
             case WM_NOTIFY:            return OnNotify(wp, lp);
             case WM_CTLCOLORSTATIC: {
@@ -2064,7 +2115,7 @@ private:
         SendMessageW(ctx->hTotalText, WM_SETFONT, (WPARAM)hBoldFont, TRUE);
 
         yPos += 28;
-        CreateWindowExW(0, L"BUTTON", L"导出数据(JSON)",
+        CreateWindowExW(0, L"BUTTON", L"导出数据...",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             dlgW / 2 - 120, yPos, 120, 28, hDlg, (HMENU)305, m_hInst, NULL);
         CreateWindowExW(0, L"BUTTON", L"关闭",
@@ -2109,6 +2160,150 @@ private:
 
         DeleteObject(hBoldFont);
         DeleteObject(hGuiFont);
+    }
+
+    // 统计导出：选择窗口 (格式 + 数据项) → 另存为 → 写入
+    void ShowExportStatsDialog(StatsDlgCtx* statsCtx) {
+        const wchar_t DLG_CLASS[] = L"ExportStatsDlg";
+        WNDCLASSEXW wc = {};
+        wc.cbSize        = sizeof(wc);
+        wc.style         = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc   = ExportStatsDlgProc;
+        wc.hInstance     = m_hInst;
+        wc.hIcon         = LoadIcon(NULL, IDI_APPLICATION);
+        wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = DLG_CLASS;
+        if (!RegisterClassExW(&wc)) return;
+
+        int dlgW = 380, dlgH = 300;
+        int sw = GetSystemMetrics(SM_CXSCREEN);
+        int sh = GetSystemMetrics(SM_CYSCREEN);
+        int x = (sw - dlgW) / 2, y = (sh - dlgH) / 2;
+
+        HWND hDlg = CreateWindowExW(0, DLG_CLASS, L"导出统计数据",
+            WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+            x, y, dlgW, dlgH, statsCtx->hDlg, NULL, m_hInst, NULL);
+        if (!hDlg) { UnregisterClassW(DLG_CLASS, m_hInst); return; }
+
+        ExportCtx* ctx = new ExportCtx();
+        ctx->hDlg = hDlg;
+        SetWindowLongPtrW(hDlg, GWLP_USERDATA, (LONG_PTR)ctx);
+
+        // 导出格式
+        CreateWindowExW(0, L"BUTTON", L"导出格式",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            15, 12, dlgW - 30, 52, hDlg, NULL, m_hInst, NULL);
+        ctx->hRadioCsv = CreateWindowExW(0, L"BUTTON", L"CSV (Excel)",
+            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP,
+            30, 32, 130, 22, hDlg, (HMENU)600, m_hInst, NULL);
+        ctx->hRadioJson = CreateWindowExW(0, L"BUTTON", L"JSON",
+            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_TABSTOP,
+            170, 32, 100, 22, hDlg, (HMENU)601, m_hInst, NULL);
+        SendMessageW(ctx->hRadioCsv, BM_SETCHECK, BST_CHECKED, 0);
+
+        // 导出内容
+        CreateWindowExW(0, L"BUTTON", L"导出内容",
+            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
+            15, 72, dlgW - 30, 140, hDlg, NULL, m_hInst, NULL);
+        ctx->hChkDaily = CreateWindowExW(0, L"BUTTON", L"每日听歌记录 (日期/星期/时长)",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+            30, 92, dlgW - 60, 22, hDlg, (HMENU)602, m_hInst, NULL);
+        ctx->hChkWeekly = CreateWindowExW(0, L"BUTTON", L"每周统计 (周次/日期范围/时长)",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+            30, 118, dlgW - 60, 22, hDlg, (HMENU)603, m_hInst, NULL);
+        ctx->hChkTop = CreateWindowExW(0, L"BUTTON", L"常听歌曲排行 (前 20)",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+            30, 144, dlgW - 60, 22, hDlg, (HMENU)604, m_hInst, NULL);
+        ctx->hChkTotal = CreateWindowExW(0, L"BUTTON", L"总计",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+            30, 170, dlgW - 60, 22, hDlg, (HMENU)605, m_hInst, NULL);
+        SendMessageW(ctx->hChkDaily, BM_SETCHECK, BST_CHECKED, 0);
+        SendMessageW(ctx->hChkWeekly, BM_SETCHECK, BST_CHECKED, 0);
+        SendMessageW(ctx->hChkTop, BM_SETCHECK, BST_CHECKED, 0);
+        SendMessageW(ctx->hChkTotal, BM_SETCHECK, BST_CHECKED, 0);
+
+        // 按钮
+        CreateWindowExW(0, L"BUTTON", L"导出",
+            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            dlgW / 2 - 115, 224, 90, 30, hDlg, (HMENU)IDOK, m_hInst, NULL);
+        CreateWindowExW(0, L"BUTTON", L"取消",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            dlgW / 2 + 25, 224, 90, 30, hDlg, (HMENU)IDCANCEL, m_hInst, NULL);
+
+        EnableWindow(m_hwnd, FALSE);
+        EnableWindow(statsCtx->hDlg, FALSE);
+        MSG msg;
+        while (IsWindow(hDlg) && GetMessageW(&msg, NULL, 0, 0)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        EnableWindow(statsCtx->hDlg, TRUE);
+        EnableWindow(m_hwnd, TRUE);
+        SetForegroundWindow(statsCtx->hDlg);
+
+        if (ctx->result == 1) {
+            DoExportStats(statsCtx, ctx->asCsv,
+                ctx->includeDaily, ctx->includeWeekly, ctx->includeTopSongs, ctx->includeTotal);
+        }
+        delete ctx;
+        UnregisterClassW(DLG_CLASS, m_hInst);
+    }
+
+    // 按所选格式与勾选项导出统计数据到用户指定文件
+    void DoExportStats(StatsDlgCtx* statsCtx, bool asCsv,
+                       bool includeDaily, bool includeWeekly,
+                       bool includeTopSongs, bool includeTotal) {
+        std::string fromDate, toDate;
+        ComputeStatsRange(statsCtx, fromDate, toDate);
+
+        StatsExportData data;
+        data.dailyRecords = m_history.GetDailyRecords(fromDate, toDate);
+        data.weeklyRecords = m_history.GetWeeklySummaries(fromDate, toDate);
+        data.totalSeconds = m_history.GetTotalSeconds(fromDate, toDate);
+
+        std::vector<std::pair<std::wstring, int>> sorted(m_playCount.begin(), m_playCount.end());
+        std::sort(sorted.begin(), sorted.end(),
+            [](const auto& a, const auto& b) { return a.second > b.second; });
+        int limit = (int)sorted.size() < 20 ? (int)sorted.size() : 20;
+        for (int i = 0; i < limit; i++) {
+            data.topSongs.push_back({ GetDisplayName(sorted[i].first), sorted[i].second });
+        }
+
+        ExportOptions opt;
+        opt.asCsv = asCsv;
+        opt.includeDaily = includeDaily;
+        opt.includeWeekly = includeWeekly;
+        opt.includeTopSongs = includeTopSongs;
+        opt.includeTotal = includeTotal;
+        std::string content = asCsv ? data.ToCsv(opt) : data.ToJson(opt);
+
+        wchar_t filePath[MAX_PATH] = {};
+        OPENFILENAMEW ofn = {};
+        ofn.lStructSize  = sizeof(ofn);
+        ofn.hwndOwner    = statsCtx->hDlg;
+        ofn.lpstrFile    = filePath;
+        ofn.nMaxFile     = MAX_PATH;
+        ofn.lpstrFilter  = L"CSV 文件 (*.csv)\0*.csv\0JSON 文件 (*.json)\0*.json\0所有文件 (*.*)\0*.*\0";
+        ofn.nFilterIndex = asCsv ? 1 : 2;
+        ofn.lpstrDefExt  = asCsv ? L"csv" : L"json";
+        ofn.Flags        = OFN_OVERWRITEPROMPT | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
+        if (!GetSaveFileNameW(&ofn)) return;
+
+        HANDLE hFile = CreateFileW(filePath, GENERIC_WRITE, 0, NULL,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) {
+            MessageBoxW(statsCtx->hDlg, L"无法写入文件。", L"导出失败", MB_OK | MB_ICONERROR);
+            return;
+        }
+        DWORD written;
+        const BYTE bomUtf8[] = { 0xEF, 0xBB, 0xBF }; // UTF-8 BOM, Excel 依赖它识别编码
+        WriteFile(hFile, bomUtf8, 3, &written, NULL);
+        WriteFile(hFile, content.c_str(), (DWORD)content.size(), &written, NULL);
+        CloseHandle(hFile);
+
+        std::wstring msg = L"统计数据已导出到:\n" + std::wstring(filePath);
+        MessageBoxW(statsCtx->hDlg, msg.c_str(), L"导出完成", MB_OK | MB_ICONINFORMATION);
     }
 
     void ShowAboutWindow() {
@@ -2192,27 +2387,8 @@ private:
     }
 
     void RefreshStatsDisplay(StatsDlgCtx* ctx) {
-        time_t now_t = time(NULL);
-        struct tm tm_now = *localtime(&now_t);
-        char fromBuf[32], toBuf[32];
-        if (ctx->useCalendarRange) {
-            snprintf(fromBuf, sizeof(fromBuf), "%04d-%02d-%02d",
-                     ctx->calStart.wYear, ctx->calStart.wMonth, ctx->calStart.wDay);
-            snprintf(toBuf, sizeof(toBuf), "%04d-%02d-%02d",
-                     ctx->calEnd.wYear, ctx->calEnd.wMonth, ctx->calEnd.wDay);
-        } else {
-            tm_now.tm_mday -= ctx->rangeDays;
-            tm_now.tm_isdst = -1;
-            mktime(&tm_now);
-            snprintf(fromBuf, sizeof(fromBuf), "%04d-%02d-%02d",
-                     tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
-
-            struct tm tm_today = *localtime(&now_t);
-            snprintf(toBuf, sizeof(toBuf), "%04d-%02d-%02d",
-                     tm_today.tm_year + 1900, tm_today.tm_mon + 1, tm_today.tm_mday);
-        }
-        std::string fromDate(fromBuf);
-        std::string toDate(toBuf);
+        std::string fromDate, toDate;
+        ComputeStatsRange(ctx, fromDate, toDate);
 
         auto daily = m_history.GetDailyRecords(fromDate, toDate);
         double total = m_history.GetTotalSeconds(fromDate, toDate);
@@ -2331,6 +2507,9 @@ private:
         }
 
         m_playlist.UpdateMetadata(index, artist, title, L"", len);
+        // 播放已知时长, 写入缓存供下次启动直接恢复
+        if (len > 0)
+            WriteDurationCache(path, len);
         // Find display index for this playlist index
         for (int di = 0; di < (int)m_filterMap.size(); di++) {
             if (m_filterMap[di] == index) { UpdateLVItem(di); break; }
@@ -2491,9 +2670,156 @@ private:
 
         SendMessageW(m_playlistLV, WM_SETREDRAW, TRUE, 0);
         InvalidateRect(m_playlistLV, NULL, TRUE);
+
+        // 歌单内容变化后: 应用缓存中的已知时长, 并将未知时长歌曲入队渐进扫描
+        ApplyDurationCache();
+        RebuildDurationScanQueue();
     }
 
-    
+    // ---- Duration cache (.durations.txt) & progressive scan ----
+
+    // 从 .durations.txt 加载时长缓存 (格式同 .loudness.txt)
+    void LoadDurationCache() {
+        m_durationCache.clear();
+        std::wstring filePath = GetExeDirectory() + L"\\.durations.txt";
+        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return;
+
+        DWORD size = GetFileSize(hFile, NULL);
+        if (size > 0 && size < 16 * 1024 * 1024) {
+            std::vector<char> buf(size + 1, 0);
+            DWORD read;
+            if (ReadFile(hFile, buf.data(), size, &read, NULL)) {
+                char* p = buf.data();
+                while (*p) {
+                    char* nl = strchr(p, '\n');
+                    if (!nl) nl = p + strlen(p);
+                    *nl = '\0';
+                    if (*p && *p != '\r') {
+                        // 格式: duration<tab>size<tab>timeHigh<tab>timeLow<tab>path(UTF-8)
+                        std::string line(p);
+                        size_t t1 = line.find('\t');
+                        size_t t2 = line.find('\t', t1 + 1);
+                        size_t t3 = line.find('\t', t2 + 1);
+                        size_t t4 = line.find('\t', t3 + 1);
+                        if (t4 != std::string::npos) {
+                            DurationCacheEntry e;
+                            e.duration = atof(line.substr(0, t1).c_str());
+                            e.size  = (ULONGLONG)strtoull(line.substr(t1 + 1, t2 - t1 - 1).c_str(), NULL, 10);
+                            e.mtime.dwHighDateTime = (DWORD)strtoul(line.substr(t2 + 1, t3 - t2 - 1).c_str(), NULL, 10);
+                            e.mtime.dwLowDateTime  = (DWORD)strtoul(line.substr(t3 + 1, t4 - t3 - 1).c_str(), NULL, 10);
+                            std::wstring path = Utf8ToWide(line.substr(t4 + 1));
+                            if (!path.empty()) m_durationCache[path] = e;
+                        }
+                    }
+                    p = nl + 1;
+                }
+            }
+        }
+        CloseHandle(hFile);
+    }
+
+    // 写回整个 .durations.txt 缓存
+    void SaveDurationCache() {
+        std::wstring filePath = GetExeDirectory() + L"\\.durations.txt";
+        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return;
+
+        std::string all;
+        all.reserve(m_durationCache.size() * 128);
+        char tmp[128];
+        for (const auto& kv : m_durationCache) {
+            sprintf(tmp, "%.2f\t%llu\t%lu\t%lu\t", kv.second.duration,
+                    (unsigned long long)kv.second.size,
+                    (unsigned long)kv.second.mtime.dwHighDateTime,
+                    (unsigned long)kv.second.mtime.dwLowDateTime);
+            all += tmp;
+            all += WideToUtf8(kv.first);
+            all += "\n";
+        }
+        DWORD written;
+        WriteFile(hFile, all.data(), (DWORD)all.size(), &written, NULL);
+        CloseHandle(hFile);
+    }
+
+    // 将一次探测/播放得到的时长写入缓存 (带文件大小+修改时间做失效判断)
+    void WriteDurationCache(const std::wstring& path, double duration) {
+        if (!m_durationCacheLoaded) {
+            LoadDurationCache();
+            m_durationCacheLoaded = true;
+        }
+        WIN32_FILE_ATTRIBUTE_DATA fad;
+        if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad)) return;
+        DurationCacheEntry e;
+        e.duration = duration;
+        e.size = ((ULONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+        e.mtime = fad.ftLastWriteTime;
+        m_durationCache[path] = e;
+        SaveDurationCache();
+    }
+
+    // 歌单中时长未知且缓存命中(文件未变)的歌曲, 直接恢复缓存时长
+    void ApplyDurationCache() {
+        if (!m_durationCacheLoaded) {
+            LoadDurationCache();
+            m_durationCacheLoaded = true;
+        }
+        for (int i = 0; i < m_playlist.GetCount(); i++) {
+            auto& song = m_playlist.GetSongs()[i];
+            if (song.duration > 0) continue;
+            auto it = m_durationCache.find(song.filePath);
+            if (it == m_durationCache.end()) continue;
+
+            WIN32_FILE_ATTRIBUTE_DATA fad;
+            if (!GetFileAttributesExW(song.filePath.c_str(), GetFileExInfoStandard, &fad)) continue;
+            ULONGLONG sz = ((ULONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+            if (it->second.size == sz &&
+                it->second.mtime.dwHighDateTime == fad.ftLastWriteTime.dwHighDateTime &&
+                it->second.mtime.dwLowDateTime == fad.ftLastWriteTime.dwLowDateTime) {
+                song.duration = it->second.duration;
+            }
+        }
+    }
+
+    // 将所有未知时长歌曲入队, 并确保扫描定时器运行
+    void RebuildDurationScanQueue() {
+        m_pendingDurationScan.clear();
+        for (int i = 0; i < m_playlist.GetCount(); i++) {
+            if (m_playlist.GetSong(i).duration <= 0)
+                m_pendingDurationScan.push_back(i);
+        }
+        if (!m_pendingDurationScan.empty())
+            SetTimer(m_hwnd, TIMER_ID_DURATION_SCAN, 500, NULL);
+        else
+            KillTimer(m_hwnd, TIMER_ID_DURATION_SCAN);
+    }
+
+    // 每个 tick 探测一个文件, 成功后更新该行时长并写缓存
+    void OnTimerDurationScan() {
+        if (!m_pendingDurationScan.empty()) {
+            int idx = m_pendingDurationScan.back();
+            m_pendingDurationScan.pop_back();
+            if (idx >= 0 && idx < m_playlist.GetCount()) {
+                auto& song = m_playlist.GetSongs()[idx];
+                if (song.duration <= 0) {
+                    double dur = AudioEngine::ProbeDuration(song.filePath);
+                    if (dur > 0) {
+                        song.duration = dur;
+                        WriteDurationCache(song.filePath, dur);
+                        for (int di = 0; di < (int)m_filterMap.size(); di++) {
+                            if (m_filterMap[di] == idx) { UpdateLVItem(di); break; }
+                        }
+                    }
+                }
+            }
+        }
+        if (m_pendingDurationScan.empty())
+            KillTimer(m_hwnd, TIMER_ID_DURATION_SCAN);
+    }
+
+
     // Hotkey bindings persistence
     
     // Hotkey bindings persistence (.hotkeys.txt) - ANSI
@@ -3038,17 +3364,29 @@ static LRESULT CALLBACK HotkeyDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProcW(hDlg, msg, wp, lp);
 }
 
-// Export stats data to JSON file (for visualization tools)
-static void ExportStatsToJson(const StatsDlgCtx* ctx) {
-    std::wstring filePath = GetExeDirectory() + L"\\.stats_export.json";
-    std::string json = ctx->win->ExportHistoryToJson();
+// 统计对话框当前展示的 [from, to] 日期区间 (与列表显示一致)
+static void ComputeStatsRange(const StatsDlgCtx* ctx, std::string& from, std::string& to) {
+    time_t now_t = time(NULL);
+    struct tm tm_now = *localtime(&now_t);
+    char fromBuf[32], toBuf[32];
+    if (ctx->useCalendarRange) {
+        snprintf(fromBuf, sizeof(fromBuf), "%04d-%02d-%02d",
+                 ctx->calStart.wYear, ctx->calStart.wMonth, ctx->calStart.wDay);
+        snprintf(toBuf, sizeof(toBuf), "%04d-%02d-%02d",
+                 ctx->calEnd.wYear, ctx->calEnd.wMonth, ctx->calEnd.wDay);
+    } else {
+        tm_now.tm_mday -= ctx->rangeDays;
+        tm_now.tm_isdst = -1;
+        mktime(&tm_now);
+        snprintf(fromBuf, sizeof(fromBuf), "%04d-%02d-%02d",
+                 tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
 
-    HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
-        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) return;
-    DWORD written;
-    WriteFile(hFile, json.c_str(), (DWORD)json.size(), &written, NULL);
-    CloseHandle(hFile);
+        struct tm tm_today = *localtime(&now_t);
+        snprintf(toBuf, sizeof(toBuf), "%04d-%02d-%02d",
+                 tm_today.tm_year + 1900, tm_today.tm_mon + 1, tm_today.tm_mday);
+    }
+    from = fromBuf;
+    to = toBuf;
 }
 
 // Compute a SYSTEMTIME offset by `days` from today (negative = past)
@@ -3261,11 +3599,46 @@ static LRESULT CALLBACK StatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) 
         }
 
         if (id == 305) { // Export button
-            ExportStatsToJson(c);
-            MessageBoxW(hDlg, L"统计数据已导出到 .stats_export.json", L"导出成功", MB_OK);
+            c->win->ShowExportStatsDialog(c);
             return 0;
         }
         return 0;
+    }
+    return DefWindowProcW(hDlg, msg, wp, lp);
+}
+
+// Stats export selection dialog proc
+static LRESULT CALLBACK ExportStatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_CLOSE) {
+        DestroyWindow(hDlg);
+        return 0;
+    }
+    if (msg == WM_COMMAND) {
+        ExportCtx* c = (ExportCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
+        if (!c) return DefWindowProcW(hDlg, msg, wp, lp);
+        int id = LOWORD(wp);
+        if (id == IDOK) {
+            bool chkDaily = SendMessageW(c->hChkDaily, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            bool chkWeekly = SendMessageW(c->hChkWeekly, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            bool chkTop = SendMessageW(c->hChkTop, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            bool chkTotal = SendMessageW(c->hChkTotal, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            if (!chkDaily && !chkWeekly && !chkTop && !chkTotal) {
+                MessageBoxW(hDlg, L"请至少勾选一项导出内容。", L"提示", MB_OK | MB_ICONINFORMATION);
+                return 0;
+            }
+            c->result = 1;
+            c->asCsv = SendMessageW(c->hRadioCsv, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            c->includeDaily = chkDaily;
+            c->includeWeekly = chkWeekly;
+            c->includeTopSongs = chkTop;
+            c->includeTotal = chkTotal;
+            DestroyWindow(hDlg);
+            return 0;
+        }
+        if (id == IDCANCEL) {
+            DestroyWindow(hDlg);
+            return 0;
+        }
     }
     return DefWindowProcW(hDlg, msg, wp, lp);
 }

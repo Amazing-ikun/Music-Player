@@ -81,6 +81,9 @@ public:
     double GetLength() const;
     void SetPosition(double seconds);
 
+    // 独立解码流探测文件时长(秒), 不发声, 不影响正在播放的流; 失败返回 0
+    static double ProbeDuration(const std::wstring& filePath);
+
     // 播放模式
     void SetPlayMode(PlayMode mode) { m_playMode = mode; }
     PlayMode GetPlayMode() const { return m_playMode; }

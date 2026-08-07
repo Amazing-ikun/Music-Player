@@ -497,6 +497,17 @@ double AudioEngine::GetLength() const {
     return BASS_ChannelBytes2Seconds(m_stream, bytes);
 }
 
+// 独立解码流探测文件时长(秒), 不发声, 不影响正在播放的流
+double AudioEngine::ProbeDuration(const std::wstring& filePath) {
+    HSTREAM decoder = BASS_StreamCreateFile(FALSE, filePath.c_str(), 0, 0,
+        BASS_STREAM_DECODE | BASS_UNICODE);
+    if (!decoder) return 0.0;
+    QWORD bytes = BASS_ChannelGetLength(decoder, BASS_POS_BYTE);
+    double secs = (bytes != 0) ? BASS_ChannelBytes2Seconds(decoder, bytes) : 0.0;
+    BASS_StreamFree(decoder);
+    return (secs > 0) ? secs : 0.0;
+}
+
 // 跳转到指定位置（秒）
 void AudioEngine::SetPosition(double seconds) {
     if (!m_stream || seconds < 0) return;

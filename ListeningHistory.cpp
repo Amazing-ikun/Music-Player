@@ -225,17 +225,6 @@ double ListeningHistory::GetTodaySeconds() const {
     return (it != m_daily.end()) ? it->second : 0.0;
 }
 
-StatsExportData ListeningHistory::GetExportData(
-    const std::string& fromDate, const std::string& toDate) const
-{
-    StatsExportData data;
-    std::string f = fromDate.empty() ? "1970-01-01" : fromDate;
-    std::string t = toDate.empty() ? DaysToDate(DateToDays(GetToday())) : toDate;
-    data.dailyRecords = GetDailyRecords(f, t);
-    data.totalSeconds = GetTotalSeconds(f, t);
-    return data;
-}
-
 void ListeningHistory::Clear() {
     m_daily.clear();
     m_dirty = true;
@@ -313,23 +302,166 @@ std::string ListeningHistory::FormatDateShort(int year, int month, int day) {
 
 // ---- StatsExportData ----
 
-std::string StatsExportData::ToJson() const {
-    std::string json = "{\n";
-    json += "  \"totalSeconds\": " + std::to_string(totalSeconds) + ",\n";
-    json += "  \"dailyRecords\": [\n";
-    for (size_t i = 0; i < dailyRecords.size(); i++) {
-        const auto& rec = dailyRecords[i];
-        char dateBuf[64];
-        snprintf(dateBuf, sizeof(dateBuf), "%ls", rec.date.c_str());
-        char wdBuf[16];
-        snprintf(wdBuf, sizeof(wdBuf), "%ls", rec.weekday.c_str());
-        json += "    {\"date\":\"" + std::string(dateBuf) + "\",";
-        json += "\"weekday\":\"" + std::string(wdBuf) + "\",";
-        json += "\"seconds\":" + std::to_string(rec.seconds) + "}";
-        if (i < dailyRecords.size() - 1) json += ",";
-        json += "\n";
+// UTF-8 conversion for JSON/CSV output so Excel reads CJK correctly
+static std::string WideToUtf8(const std::wstring& ws) {
+    if (ws.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), (int)ws.size(), NULL, 0, NULL, NULL);
+    if (n <= 0) return {};
+    std::string out(n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), (int)ws.size(), &out[0], n, NULL, NULL);
+    return out;
+}
+
+// Escape a UTF-8 string for embedding in JSON
+static std::string JsonEscape(const std::wstring& s) {
+    std::string u = WideToUtf8(s);
+    std::string out;
+    out.reserve(u.size());
+    for (unsigned char c : u) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    char buf[8];
+                    snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out += (char)c;
+                }
+        }
     }
-    json += "  ]\n";
-    json += "}\n";
+    return out;
+}
+
+// Quote a CSV field if it contains a separator, quote, or newline
+static std::string CsvCell(const std::wstring& s) {
+    std::string u = WideToUtf8(s);
+    if (u.find_first_of(",\"\r\n") == std::string::npos) return u;
+    std::string out = "\"";
+    for (char c : u) {
+        if (c == '"') out += "\"\"";
+        else out += c;
+    }
+    out += "\"";
+    return out;
+}
+
+// Format a number without trailing zeros (e.g. 1200.5 not 1200.500000)
+static std::string FormatNum(double v) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%.2f", v);
+    std::string s(buf);
+    size_t dot = s.find('.');
+    if (dot != std::string::npos) {
+        while (!s.empty() && s.back() == '0') s.pop_back();
+        if (!s.empty() && s.back() == '.') s.pop_back();
+    }
+    return s.empty() ? "0" : s;
+}
+
+// Human readable duration, e.g. 34小时17分36秒
+static std::string FormatDurationReadable(double seconds) {
+    long long total = (long long)(seconds + 0.5);
+    long long h = total / 3600;
+    long long m = (total % 3600) / 60;
+    long long s = total % 60;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%lld小时%lld分%lld秒", h, m, s);
+    return buf;
+}
+
+std::string StatsExportData::ToJson(const ExportOptions& opt) const {
+    std::string json = "{\n";
+
+    if (opt.includeTotal)
+        json += "  \"totalSeconds\": " + FormatNum(totalSeconds) + ",\n";
+
+    if (opt.includeDaily) {
+        json += "  \"dailyRecords\": [\n";
+        for (size_t i = 0; i < dailyRecords.size(); i++) {
+            const auto& r = dailyRecords[i];
+            json += "    {\"date\":\"" + JsonEscape(r.date) + "\",";
+            json += "\"weekday\":\"" + JsonEscape(r.weekday) + "\",";
+            json += "\"seconds\":" + FormatNum(r.seconds) + "}";
+            if (i < dailyRecords.size() - 1) json += ",";
+            json += "\n";
+        }
+        json += "  ],\n";
+    }
+
+    if (opt.includeWeekly) {
+        json += "  \"weeklyRecords\": [\n";
+        for (size_t i = 0; i < weeklyRecords.size(); i++) {
+            const auto& w = weeklyRecords[i];
+            json += "    {\"label\":\"" + JsonEscape(w.label) + "\",";
+            json += "\"dateRange\":\"" + JsonEscape(w.dateRange) + "\",";
+            json += "\"seconds\":" + FormatNum(w.seconds) + "}";
+            if (i < weeklyRecords.size() - 1) json += ",";
+            json += "\n";
+        }
+        json += "  ],\n";
+    }
+
+    if (opt.includeTopSongs) {
+        json += "  \"topSongs\": [\n";
+        for (size_t i = 0; i < topSongs.size(); i++) {
+            const auto& t = topSongs[i];
+            json += "    {\"rank\":" + std::to_string(i + 1) + ",";
+            json += "\"name\":\"" + JsonEscape(t.name) + "\",";
+            json += "\"count\":" + std::to_string(t.count) + "}";
+            if (i < topSongs.size() - 1) json += ",";
+            json += "\n";
+        }
+        json += "  ],\n";
+    }
+
+    // Drop the trailing ",\n" left by the last included section, then close
+    if (json.size() >= 2 && json.compare(json.size() - 2, 2, ",\n") == 0)
+        json.erase(json.size() - 2);
+    json += "\n}\n";
     return json;
+}
+
+std::string StatsExportData::ToCsv(const ExportOptions& opt) const {
+    std::string csv;
+
+    if (opt.includeDaily) {
+        csv += "每日听歌记录\n";
+        csv += "日期,星期,时长(秒)\n";
+        for (const auto& r : dailyRecords) {
+            csv += CsvCell(r.date) + "," + CsvCell(r.weekday) + "," + FormatNum(r.seconds) + "\n";
+        }
+        csv += "\n";
+    }
+
+    if (opt.includeWeekly) {
+        csv += "每周统计\n";
+        csv += "周次,日期范围,时长(秒)\n";
+        for (const auto& w : weeklyRecords) {
+            csv += CsvCell(w.label) + "," + CsvCell(w.dateRange) + "," + FormatNum(w.seconds) + "\n";
+        }
+        csv += "\n";
+    }
+
+    if (opt.includeTopSongs) {
+        csv += "常听歌曲排行\n";
+        csv += "排名,歌曲,次数\n";
+        for (size_t i = 0; i < topSongs.size(); i++) {
+            csv += std::to_string(i + 1) + "," + CsvCell(topSongs[i].name) + "," +
+                   std::to_string(topSongs[i].count) + "\n";
+        }
+        csv += "\n";
+    }
+
+    if (opt.includeTotal) {
+        csv += "总计\n";
+        csv += "总时长(秒),总时长\n";
+        csv += FormatNum(totalSeconds) + "," + FormatDurationReadable(totalSeconds) + "\n";
+    }
+
+    return csv;
 }

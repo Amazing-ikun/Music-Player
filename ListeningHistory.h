@@ -18,12 +18,29 @@ struct WeekSummary {
 };
 
 // ---- Exported data interface (for visualization tools) ----
+struct TopSongRecord {
+    std::wstring name;   // display name
+    int count;           // play count
+};
+
+// Which sections to include and the output format
+struct ExportOptions {
+    bool asCsv = true;          // true: CSV, false: JSON
+    bool includeDaily = true;
+    bool includeWeekly = true;
+    bool includeTopSongs = true;
+    bool includeTotal = true;
+};
+
 struct StatsExportData {
     std::vector<ListenRecord> dailyRecords;
-    double totalSeconds;
+    std::vector<WeekSummary> weeklyRecords;
+    std::vector<TopSongRecord> topSongs;
+    double totalSeconds = 0.0;
 
-    // Export to JSON string for external tools
-    std::string ToJson() const;
+    // Serialize the selected sections as UTF-8 JSON / CSV
+    std::string ToJson(const ExportOptions& opt) const;
+    std::string ToCsv(const ExportOptions& opt) const;
 };
 
 // Listening history tracker
@@ -52,10 +69,6 @@ public:
 
     // Today's total
     double GetTodaySeconds() const;
-
-    // Exported data interface (reserved for visualization tools)
-    StatsExportData GetExportData(const std::string& fromDate = "",
-                                  const std::string& toDate = "") const;
 
     // Clear all data (for testing / reset)
     void Clear();

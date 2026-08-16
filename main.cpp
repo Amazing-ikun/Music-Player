@@ -5,10 +5,16 @@
 #include <commctrl.h>
 
 // MusicPlayer version
-static const wchar_t* APP_VERSION = L"1.4.1";
+static const wchar_t* APP_VERSION = L"1.4.2";
 
 // Changelog — shown in the About dialog
 static const wchar_t* CHANGELOG =
+    L"v1.4.2\r\n"
+    L"  - 计时区间现在严格对应\"音频正在播放\"：StartListening 只在 Play() 成功后、以及暂停恢复（淡入）时开启；所有停止播放的路径（换歌、播完、暂停淡出、删除当前歌、换文件夹、关程序）都会 StopListening\r\n"
+    L"  - 一天的累计时长不会再虚增超过 24 小时\r\n"
+    L"  - 墙钟计时的既有语义不变（倍速、静音仍按实际经过时间计）\r\n"
+    L"  - 修复跨午夜听歌时长整段计入结束日的问题：改为按本地午夜切分，分别计入前后两天\r\n"
+    L"\r\n"
     L"v1.4.1\r\n"
     L"  - 修复: 启动时缓存命中的歌曲时长仍显示 --:-- (改为先应用缓存再渲染列表)\r\n"
     L"\r\n"
@@ -380,7 +386,7 @@ public:
         , m_settingsTray(true), m_trayIconAdded(false)
         , m_balanceEnabled(true)
         , m_ctrlPanel(NULL)
-        , m_listening(false), m_saveTick(0), m_nextScheduled(-1)
+        , m_listening(false), m_listenStartWall(0), m_saveTick(0), m_nextScheduled(-1)
         , m_undoValid(false)
     {
         srand((unsigned)time(NULL));
@@ -475,6 +481,7 @@ private:
     ListeningHistory m_history;
     bool m_listening;
     std::chrono::steady_clock::time_point m_listenStart;
+    time_t m_listenStartWall;
     int m_saveTick;
     int m_nextScheduled;  // index to play after current song ends, -1 = none
 
@@ -1294,6 +1301,7 @@ private:
         if (next >= 0 && next < count) {
             PlayFile(next);
         } else {
+            StopListening();  // 播放完毕，关闭计时，避免空闲时间被计入
             m_currentIndex = -1;
             SetWindowTextW(m_staticSong, L"播放完毕");
             SetWindowTextW(m_staticTime, L"00:00 / 00:00");
@@ -1316,6 +1324,7 @@ private:
         wchar_t path[MAX_PATH];
         if (SHGetPathFromIDListW(pidl, path)) {
             m_audio.Unload();
+            StopListening();  // 卸载当前歌曲后停止计时，避免扫描新文件夹期间被计入
             KillTimer(m_hwnd, TIMER_ID_SEEK);
             m_currentIndex = -1;
             m_userDraggingSeek = false;
@@ -2456,6 +2465,7 @@ private:
         if (!m_listening) {
             m_listening = true;
             m_listenStart = std::chrono::steady_clock::now();
+            m_listenStartWall = time(NULL);
         }
     }
 
@@ -2464,7 +2474,7 @@ private:
             auto now = std::chrono::steady_clock::now();
             double elapsed = std::chrono::duration<double>(now - m_listenStart).count();
             if (elapsed > 0.5) // ignore sub-second glitches
-                m_history.AddSession(elapsed);
+                m_history.AddSession(elapsed, m_listenStartWall);
             m_listening = false;
         }
     }
@@ -2475,6 +2485,7 @@ private:
         if (index < 0 || index >= m_playlist.GetCount()) return;
 
         KillTimer(m_hwnd, TIMER_ID_SEEK);
+        StopListening();  // 关闭上一段计时，避免换歌/加载间隙被计入听歌时长
         const std::wstring& path = m_playlist.GetFile(index);
 
         if (!m_audio.Load(path)) {

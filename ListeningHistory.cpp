@@ -74,10 +74,30 @@ ListeningHistory::~ListeningHistory() {
         Save(m_filePath);
 }
 
-void ListeningHistory::AddSession(double seconds) {
+void ListeningHistory::AddSession(double seconds, time_t startTime) {
     if (seconds <= 0) return;
-    std::string today = GetToday();
-    m_daily[today] += seconds;
+
+    time_t endTime = startTime + (time_t)seconds;
+    std::string startDate = DateOfTime(startTime);
+    std::string endDate = DateOfTime(endTime);
+
+    if (startDate == endDate) {
+        m_daily[startDate] += seconds;
+        m_dirty = true;
+        return;
+    }
+
+    // 跨午夜: 按下一个本地午夜切分, 分别计入前后两天
+    struct tm* st = localtime(&startTime);
+    double intoDay = st->tm_hour * 3600.0 + st->tm_min * 60.0 + st->tm_sec;
+    double untilMidnight = 86400.0 - intoDay;
+
+    double before = (seconds < untilMidnight) ? seconds : untilMidnight;
+    m_daily[startDate] += before;
+    double after = seconds - before;
+    if (after > 0)
+        m_daily[endDate] += after;
+
     m_dirty = true;
 }
 
@@ -231,6 +251,11 @@ void ListeningHistory::Clear() {
 }
 
 // ---- internal statics ----
+
+std::string ListeningHistory::DateOfTime(time_t t) {
+    struct tm* lt = localtime(&t);
+    return DateToKey(lt->tm_year + 1900, lt->tm_mon + 1, lt->tm_mday);
+}
 
 std::string ListeningHistory::GetToday() {
     time_t now = time(NULL);

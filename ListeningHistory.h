@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <ctime>
 
 // Daily listening record
 struct ListenRecord {
@@ -49,8 +50,9 @@ public:
     ListeningHistory();
     ~ListeningHistory();
 
-    // Add a listening session (seconds)
-    void AddSession(double seconds);
+    // Add a listening session (seconds). startTime is the wall-clock start of
+    // the session; sessions crossing midnight are split across both days.
+    void AddSession(double seconds, time_t startTime);
 
     // Load/save from file
     void Load(const std::wstring& filePath);
@@ -81,6 +83,7 @@ private:
     bool m_dirty = false;
 
     static std::string GetToday();
+    static std::string DateOfTime(time_t t);
     static std::string DateToKey(int year, int month, int day);
     static void KeyToDate(const std::string& key, int& year, int& month, int& day);
     static std::wstring GetWeekday(int year, int month, int day);

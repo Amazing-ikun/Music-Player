@@ -5,10 +5,13 @@
 #include <commctrl.h>
 
 // MusicPlayer version
-static const wchar_t* APP_VERSION = L"1.4.2";
+static const wchar_t* APP_VERSION = L"1.4.3";
 
 // Changelog — shown in the About dialog
 static const wchar_t* CHANGELOG =
+    L"v1.4.3\r\n"
+    L"  - 修复: 合盖休眠期间仍被计入听歌时长, 导致一天累计虚增至 23 小时 59 分 (改为休眠时结束当前计时段并落盘, 唤醒后若仍在播放则重新计时)\r\n"
+    L"\r\n"
     L"v1.4.2\r\n"
     L"  - 计时区间现在严格对应\"音频正在播放\"：StartListening 只在 Play() 成功后、以及暂停恢复（淡入）时开启；所有停止播放的路径（换歌、播完、暂停淡出、删除当前歌、换文件夹、关程序）都会 StopListening\r\n"
     L"  - 一天的累计时长不会再虚增超过 24 小时\r\n"
@@ -534,6 +537,17 @@ private:
                 else if (wp == TIMER_ID_DURATION_SCAN) OnTimerDurationScan();
                 return 0;
             case WM_HOTKEY:            OnGlobalHotkey((int)wp);     return 0;
+            case WM_POWERBROADCAST:
+                // 合盖休眠时结束当前计时段, 避免休眠期间被计入听歌时长;
+                // 唤醒后若音频仍在播放则重新开始计时
+                if (wp == PBT_APMSUSPEND) {
+                    StopListening();
+                    m_history.Save(GetExeDirectory() + L"\\.history.txt");
+                } else if (wp == PBT_APMRESUMESUSPEND || wp == PBT_APMRESUMEAUTOMATIC) {
+                    if (m_audio.IsPlaying())
+                        StartListening();
+                }
+                return TRUE;
             case WM_NOTIFY:            return OnNotify(wp, lp);
             case WM_CTLCOLORSTATIC: {
                 HWND hCtrl = (HWND)lp;

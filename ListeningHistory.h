@@ -72,6 +72,9 @@ public:
     // Today's total
     double GetTodaySeconds() const;
 
+    // Earliest date with any recorded data ("YYYY-MM-DD"); empty if none
+    std::string GetEarliestDate() const;
+
     // Clear all data (for testing / reset)
     void Clear();
 

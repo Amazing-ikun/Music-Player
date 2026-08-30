@@ -5,13 +5,17 @@
 #include <commctrl.h>
 
 // MusicPlayer version
-static const wchar_t* APP_VERSION = L"1.4.4";
+static const wchar_t* APP_VERSION = L"1.4.5";
 
 // Changelog — shown in the About dialog
 static const wchar_t* CHANGELOG =
+    L"v1.4.5\r\n"
+    L"  - 新增: 设置 → 重新统计歌曲时长, 全量重扫歌单时长; 对比 .durations.txt 缓存自动跳过未变化歌曲, 扫描期间防重复触发\r\n"
+    L"\r\n"
     L"v1.4.4\r\n"
     L"  - 修复: 重启 Windows 资源管理器后系统托盘图标消失、窗口无法从托盘恢复 (改为监听 TaskbarCreated 消息并在资源管理器重建后自动重新添加托盘图标)\r\n"
     L"  - 调整播放列表列宽: 标题列改为随窗口宽度自适应伸缩填满剩余空间, # / 专辑 / 时长保持固定\r\n"
+    L"  - 统计窗口: 「统计周期」更名为「统计范围」, 新增「所有」选项 (统计全部历史)\r\n"
     L"\r\n"
     L"v1.4.3\r\n"
     L"  - 修复: 合盖休眠期间仍被计入听歌时长, 导致一天累计虚增至 23 小时 59 分 (改为休眠时结束当前计时段并落盘, 唤醒后若仍在播放则重新计时)\r\n"
@@ -298,13 +302,14 @@ struct StatsDlgCtx {
     MainWindow* win;
     int rangeDays;
     bool useCalendarRange;
+    bool useAllRange;
     SYSTEMTIME calStart, calEnd;
 
     int baseW, baseH;
     int yDayList, yWeekList, yPlayList, yTotal, yButtons;
     int hDay, hWeek, hPlay;
 
-    HWND hRadio7, hRadio30, hRadioCustom;
+    HWND hRadio7, hRadio30, hRadioAll, hRadioCustom;
     HWND hDtpStart, hDtpEnd;
     HWND hDayList, hWeekList, hPlayCountList, hTotalText;
     HWND hLabelDay, hLabelWeek, hLabelPlay;
@@ -443,6 +448,9 @@ public:
         return true;
     }
 
+    // 最早有听歌记录的那天 (YYYY-MM-DD); 无记录返回空串. 供"统计范围=所有"使用
+    std::string GetHistoryEarliestDate() const { return m_history.GetEarliestDate(); }
+
 private:
     // ---- Controls ----
     HWND m_hwnd;
@@ -501,7 +509,8 @@ private:
     // ---- Duration cache & progressive scan ----
     std::map<std::wstring, DurationCacheEntry> m_durationCache;
     bool m_durationCacheLoaded = false;
-    std::vector<int> m_pendingDurationScan;  // playlist indexes with unknown duration
+    std::vector<int> m_pendingDurationScan;  // playlist indexes to scan (unknown durations, or all during full rescan)
+    bool m_fullDurationScan = false;         // 全量重扫进行中 (用于防重复执行)
 
     // ---- Undo remove ----
     SongInfo m_undoSong;
@@ -754,6 +763,8 @@ private:
         AppendMenuW(m_settingsMenu, MF_STRING, ID_SETTINGS_HOTKEYS,
             L"配置快捷键...");
         AppendMenuW(m_settingsMenu, MF_STRING, ID_SETTINGS_STATS, L"统计");
+        AppendMenuW(m_settingsMenu, MF_STRING, ID_SETTINGS_RESCAN_DURATIONS,
+            L"重新统计歌曲时长");
         AppendMenuW(m_settingsMenu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(m_settingsMenu, MF_STRING, ID_SETTINGS_ABOUT, L"关于...");
         AppendMenuW(bar, MF_POPUP, (UINT_PTR)m_settingsMenu, L"设置(&S)");
@@ -790,8 +801,8 @@ private:
         CreateWindowExW(0, L"STATIC", L"搜索:",
             WS_CHILD | WS_VISIBLE,
             0, 0, 0, 0, m_hwnd, NULL, m_hInst, NULL);
-        m_searchEdit = CreateWindowExW(0, L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_LEFT,
+        m_searchEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_LEFT,
             0, 0, 0, 0, m_hwnd, (HMENU)IDC_SEARCH_EDIT, m_hInst, NULL);
 
         // Background panel for bottom controls
@@ -860,8 +871,9 @@ private:
         int w = rc.right, h = rc.bottom;
         const int M = 8;
         const int searchH = 22;
+        const int searchTop = 14;   // 搜索框距菜单栏的顶部间距
         const int ctrlPanelH = 96;  // bottom panel height: controls + padding
-        const int lvY = M + searchH + M;
+        const int lvY = searchTop + searchH + M;
         int panelY = h - ctrlPanelH;
         int listH = panelY - lvY - M;  // M gap between listview and panel
         if (listH < 30) listH = 30;
@@ -869,11 +881,11 @@ private:
         // Search label + edit at top
         HWND hSearchLabel = FindWindowExW(m_hwnd, NULL, L"STATIC", L"搜索:");
         if (hSearchLabel) {
-            SetWindowPos(hSearchLabel, NULL, M, M, 40, searchH, SWP_NOZORDER);
+            SetWindowPos(hSearchLabel, NULL, M, searchTop, 40, searchH, SWP_NOZORDER);
             SendMessageW(hSearchLabel, WM_SETFONT, (WPARAM)m_hFont, TRUE);
         }
         if (m_searchEdit) {
-            SetWindowPos(m_searchEdit, NULL, M + 42, M, w - 2 * M - 42, searchH, SWP_NOZORDER);
+            SetWindowPos(m_searchEdit, NULL, M + 42, searchTop, w - 2 * M - 42, searchH, SWP_NOZORDER);
             SendMessageW(m_searchEdit, WM_SETFONT, (WPARAM)m_hFont, TRUE);
         }
 
@@ -985,6 +997,9 @@ private:
                     break;
                 case ID_SETTINGS_STATS:
                     ShowStatsWindow();
+                    break;
+                case ID_SETTINGS_RESCAN_DURATIONS:
+                    OnRescanDurations();
                     break;
                 case ID_SETTINGS_ABOUT:
                     ShowAboutWindow();
@@ -2032,11 +2047,13 @@ private:
         ctx->win = this;
         ctx->rangeDays = 30;
         ctx->useCalendarRange = false;
+        ctx->useAllRange = false;
         ctx->dtpGuard = false;
         memset(&ctx->calStart, 0, sizeof(SYSTEMTIME));
         memset(&ctx->calEnd, 0, sizeof(SYSTEMTIME));
         ctx->hRadio7 = NULL;
         ctx->hRadio30 = NULL;
+        ctx->hRadioAll = NULL;
         ctx->hRadioCustom = NULL;
         ctx->hDtpStart = NULL;
         ctx->hDtpEnd = NULL;
@@ -2056,25 +2073,30 @@ private:
         int yPos = 15;
         int rY = yPos + 18;
 
-        // --- Group box: 统计周期 ---
-        CreateWindowExW(0, L"BUTTON", L"统计周期",
+        // --- Group box: 统计范围 ---
+        CreateWindowExW(0, L"BUTTON", L"统计范围",
             WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
             10, yPos, dlgW - 20, 50, hDlg, NULL, m_hInst, NULL);
 
-        ctx->hRadio7 = CreateWindowExW(0, L"BUTTON", L"7天",
+        ctx->hRadioAll = CreateWindowExW(0, L"BUTTON", L"所有",
             WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
-            25, rY, 55, 22, hDlg, (HMENU)300, m_hInst, NULL);
+            25, rY, 55, 22, hDlg, (HMENU)303, m_hInst, NULL);
+        SendMessageW(ctx->hRadioAll, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
+
+        ctx->hRadio7 = CreateWindowExW(0, L"BUTTON", L"7天",
+            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+            85, rY, 55, 22, hDlg, (HMENU)300, m_hInst, NULL);
         SendMessageW(ctx->hRadio7, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
 
         ctx->hRadio30 = CreateWindowExW(0, L"BUTTON", L"30天",
             WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-            90, rY, 60, 22, hDlg, (HMENU)301, m_hInst, NULL);
+            145, rY, 60, 22, hDlg, (HMENU)301, m_hInst, NULL);
         SendMessageW(ctx->hRadio30, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
         SendMessageW(ctx->hRadio30, BM_SETCHECK, BST_CHECKED, 0);
 
         ctx->hRadioCustom = CreateWindowExW(0, L"BUTTON", L"自定义",
             WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-            155, rY, 65, 22, hDlg, (HMENU)302, m_hInst, NULL);
+            210, rY, 65, 22, hDlg, (HMENU)302, m_hInst, NULL);
         SendMessageW(ctx->hRadioCustom, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
 
         // --- DTP row + buttons ---
@@ -2848,27 +2870,83 @@ private:
             KillTimer(m_hwnd, TIMER_ID_DURATION_SCAN);
     }
 
+    // 重新统计歌曲时长: 全量重扫, 但逐首对比文件信息(size+mtime)与缓存, 一致则跳过
+    void OnRescanDurations() {
+        if (m_fullDurationScan) {
+            MessageBoxW(m_hwnd, L"正在统计歌曲时长，请稍候", L"提示", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+        if (!m_durationCacheLoaded) {
+            LoadDurationCache();
+            m_durationCacheLoaded = true;
+        }
+        m_pendingDurationScan.clear();
+        for (int i = 0; i < m_playlist.GetCount(); i++)
+            m_pendingDurationScan.push_back(i);
+        if (m_pendingDurationScan.empty()) return;
+        m_fullDurationScan = true;
+        SetTimer(m_hwnd, TIMER_ID_DURATION_SCAN, 500, NULL);
+    }
+
+    void UpdateLVItemForPlaylistIndex(int idx) {
+        for (int di = 0; di < (int)m_filterMap.size(); di++) {
+            if (m_filterMap[di] == idx) { UpdateLVItem(di); break; }
+        }
+    }
+
     // 每个 tick 探测一个文件, 成功后更新该行时长并写缓存
     void OnTimerDurationScan() {
-        if (!m_pendingDurationScan.empty()) {
-            int idx = m_pendingDurationScan.back();
-            m_pendingDurationScan.pop_back();
-            if (idx >= 0 && idx < m_playlist.GetCount()) {
-                auto& song = m_playlist.GetSongs()[idx];
-                if (song.duration <= 0) {
-                    double dur = AudioEngine::ProbeDuration(song.filePath);
-                    if (dur > 0) {
-                        song.duration = dur;
-                        WriteDurationCache(song.filePath, dur);
-                        for (int di = 0; di < (int)m_filterMap.size(); di++) {
-                            if (m_filterMap[di] == idx) { UpdateLVItem(di); break; }
-                        }
+        if (m_pendingDurationScan.empty()) {
+            KillTimer(m_hwnd, TIMER_ID_DURATION_SCAN);
+            m_fullDurationScan = false;
+            return;
+        }
+        int idx = m_pendingDurationScan.back();
+        m_pendingDurationScan.pop_back();
+        if (idx < 0 || idx >= m_playlist.GetCount()) {
+            if (m_pendingDurationScan.empty()) {
+                KillTimer(m_hwnd, TIMER_ID_DURATION_SCAN);
+                m_fullDurationScan = false;
+            }
+            return;
+        }
+        auto& song = m_playlist.GetSongs()[idx];
+        bool needProbe = true;
+
+        if (m_fullDurationScan) {
+            // 文件信息与缓存一致且已有有效时长 → 跳过, 不重复探测
+            WIN32_FILE_ATTRIBUTE_DATA fad;
+            if (GetFileAttributesExW(song.filePath.c_str(), GetFileExInfoStandard, &fad)) {
+                ULONGLONG sz = ((ULONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+                auto it = m_durationCache.find(song.filePath);
+                if (it != m_durationCache.end() && it->second.duration > 0 &&
+                    it->second.size == sz &&
+                    it->second.mtime.dwHighDateTime == fad.ftLastWriteTime.dwHighDateTime &&
+                    it->second.mtime.dwLowDateTime == fad.ftLastWriteTime.dwLowDateTime) {
+                    needProbe = false;
+                    if (song.duration <= 0) {
+                        song.duration = it->second.duration;
+                        UpdateLVItemForPlaylistIndex(idx);
                     }
                 }
             }
+        } else if (song.duration > 0) {
+            needProbe = false;
         }
-        if (m_pendingDurationScan.empty())
+
+        if (needProbe) {
+            double dur = AudioEngine::ProbeDuration(song.filePath);
+            if (dur > 0) {
+                song.duration = dur;
+                WriteDurationCache(song.filePath, dur);
+                UpdateLVItemForPlaylistIndex(idx);
+            }
+        }
+
+        if (m_pendingDurationScan.empty()) {
             KillTimer(m_hwnd, TIMER_ID_DURATION_SCAN);
+            m_fullDurationScan = false;
+        }
     }
 
 
@@ -3421,7 +3499,18 @@ static void ComputeStatsRange(const StatsDlgCtx* ctx, std::string& from, std::st
     time_t now_t = time(NULL);
     struct tm tm_now = *localtime(&now_t);
     char fromBuf[32], toBuf[32];
-    if (ctx->useCalendarRange) {
+    if (ctx->useAllRange) {
+        // 所有: 从最早有记录的那天到今天
+        std::string earliest = ctx->win->GetHistoryEarliestDate();
+        if (earliest.empty()) {
+            snprintf(fromBuf, sizeof(fromBuf), "%04d-%02d-%02d",
+                     tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+        } else {
+            snprintf(fromBuf, sizeof(fromBuf), "%s", earliest.c_str());
+        }
+        snprintf(toBuf, sizeof(toBuf), "%04d-%02d-%02d",
+                 tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    } else if (ctx->useCalendarRange) {
         snprintf(fromBuf, sizeof(fromBuf), "%04d-%02d-%02d",
                  ctx->calStart.wYear, ctx->calStart.wMonth, ctx->calStart.wDay);
         snprintf(toBuf, sizeof(toBuf), "%04d-%02d-%02d",
@@ -3592,8 +3681,10 @@ static LRESULT CALLBACK StatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) 
                 return 0;
             if (nm->idFrom == 310) c->calStart = st;
             else c->calEnd = st;
+            c->useAllRange = false;
             c->useCalendarRange = true;
             ValidateCustomRange(c, hDlg);
+            SendMessageW(c->hRadioAll, BM_SETCHECK, BST_UNCHECKED, 0);
             SendMessageW(c->hRadio7, BM_SETCHECK, BST_UNCHECKED, 0);
             SendMessageW(c->hRadio30, BM_SETCHECK, BST_UNCHECKED, 0);
             SendMessageW(c->hRadioCustom, BM_SETCHECK, BST_CHECKED, 0);
@@ -3613,16 +3704,27 @@ static LRESULT CALLBACK StatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) 
         }
 
         if (id == 304) { // Refresh button
-            if (SendMessageW(c->hRadio7, BM_GETCHECK, 0, 0) == BST_CHECKED)
+            if (SendMessageW(c->hRadioAll, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+                c->useAllRange = true;
+                c->useCalendarRange = false;
+            }
+            else if (SendMessageW(c->hRadio7, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+                c->useAllRange = false;
+                c->useCalendarRange = false;
                 c->rangeDays = 7;
-            else if (SendMessageW(c->hRadio30, BM_GETCHECK, 0, 0) == BST_CHECKED)
+            }
+            else if (SendMessageW(c->hRadio30, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+                c->useAllRange = false;
+                c->useCalendarRange = false;
                 c->rangeDays = 30;
+            }
             else {
                 SYSTEMTIME st;
                 if (c->hDtpStart && SendMessageW(c->hDtpStart, DTM_GETSYSTEMTIME, 0, (LPARAM)&st) == GDT_VALID)
                     c->calStart = st;
                 if (c->hDtpEnd && SendMessageW(c->hDtpEnd, DTM_GETSYSTEMTIME, 0, (LPARAM)&st) == GDT_VALID)
                     c->calEnd = st;
+                c->useAllRange = false;
                 c->useCalendarRange = true;
                 ValidateCustomRange(c, hDlg);
             }
@@ -3631,6 +3733,7 @@ static LRESULT CALLBACK StatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) 
         }
 
         if (id == 300) { // Radio 7
+            c->useAllRange = false;
             c->useCalendarRange = false;
             c->rangeDays = 7;
             SyncDtpToRange(c);
@@ -3638,6 +3741,7 @@ static LRESULT CALLBACK StatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) 
             return 0;
         }
         if (id == 301) { // Radio 30
+            c->useAllRange = false;
             c->useCalendarRange = false;
             c->rangeDays = 30;
             SyncDtpToRange(c);
@@ -3645,7 +3749,14 @@ static LRESULT CALLBACK StatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) 
             return 0;
         }
         if (id == 302) { // Radio Custom
+            c->useAllRange = false;
             c->useCalendarRange = true;
+            c->win->RefreshStatsDisplay(c);
+            return 0;
+        }
+        if (id == 303) { // Radio All
+            c->useAllRange = true;
+            c->useCalendarRange = false;
             c->win->RefreshStatsDisplay(c);
             return 0;
         }

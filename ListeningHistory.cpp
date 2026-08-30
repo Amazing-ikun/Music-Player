@@ -245,6 +245,10 @@ double ListeningHistory::GetTodaySeconds() const {
     return (it != m_daily.end()) ? it->second : 0.0;
 }
 
+std::string ListeningHistory::GetEarliestDate() const {
+    return m_daily.empty() ? std::string() : m_daily.begin()->first;
+}
+
 void ListeningHistory::Clear() {
     m_daily.clear();
     m_dirty = true;

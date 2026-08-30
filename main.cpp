@@ -5,10 +5,13 @@
 #include <commctrl.h>
 
 // MusicPlayer version
-static const wchar_t* APP_VERSION = L"1.4.3";
+static const wchar_t* APP_VERSION = L"1.4.4";
 
 // Changelog — shown in the About dialog
 static const wchar_t* CHANGELOG =
+    L"v1.4.4\r\n"
+    L"  - 修复: 重启 Windows 资源管理器后系统托盘图标消失、窗口无法从托盘恢复 (改为监听 TaskbarCreated 消息并在资源管理器重建后自动重新添加托盘图标)\r\n"
+    L"\r\n"
     L"v1.4.3\r\n"
     L"  - 修复: 合盖休眠期间仍被计入听歌时长, 导致一天累计虚增至 23 小时 59 分 (改为休眠时结束当前计时段并落盘, 唤醒后若仍在播放则重新计时)\r\n"
     L"\r\n"
@@ -386,7 +389,7 @@ public:
         , m_sortColumn(-1), m_sortAscending(true)
         , m_shufflePos(0)
         , m_settingsAutoplay(1), m_settingsRememberProgress(true)
-        , m_settingsTray(true), m_trayIconAdded(false)
+        , m_settingsTray(true), m_trayIconAdded(false), m_taskbarCreatedMsg(0)
         , m_balanceEnabled(true)
         , m_ctrlPanel(NULL)
         , m_listening(false), m_listenStartWall(0), m_saveTick(0), m_nextScheduled(-1)
@@ -394,6 +397,7 @@ public:
     {
         srand((unsigned)time(NULL));
         InitDefaultHotkeys();
+        m_taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
     }
 
     bool Create(HINSTANCE hInst, int nCmdShow) {
@@ -468,6 +472,7 @@ private:
     bool m_settingsRememberProgress;
     bool m_settingsTray;
     bool m_trayIconAdded;
+    UINT m_taskbarCreatedMsg; // "TaskbarCreated" 注册消息, 用于探测资源管理器重启
     bool m_balanceEnabled;   // 音量平衡
 
     // ---- Hotkeys ----
@@ -566,6 +571,12 @@ private:
                 if (msg == WM_APP_FADE_DONE) { OnFadeDone(); return 0; }
                 if (msg == WM_APP_BRING_TO_TOP) {
                     SetForegroundWindow(m_hwnd);
+                    return 0;
+                }
+                if (msg == m_taskbarCreatedMsg && m_taskbarCreatedMsg != 0) {
+                    // 资源管理器重启后托盘图标被系统清除, 需重新添加
+                    m_trayIconAdded = false;
+                    AddTrayIcon();
                     return 0;
                 }
                 return DefWindowProcW(m_hwnd, msg, wp, lp);

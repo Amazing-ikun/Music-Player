@@ -11,6 +11,7 @@ static const wchar_t* APP_VERSION = L"1.4.4";
 static const wchar_t* CHANGELOG =
     L"v1.4.4\r\n"
     L"  - 修复: 重启 Windows 资源管理器后系统托盘图标消失、窗口无法从托盘恢复 (改为监听 TaskbarCreated 消息并在资源管理器重建后自动重新添加托盘图标)\r\n"
+    L"  - 调整播放列表列宽: 标题列改为随窗口宽度自适应伸缩填满剩余空间, # / 专辑 / 时长保持固定\r\n"
     L"\r\n"
     L"v1.4.3\r\n"
     L"  - 修复: 合盖休眠期间仍被计入听歌时长, 导致一天累计虚增至 23 小时 59 分 (改为休眠时结束当前计时段并落盘, 唤醒后若仍在播放则重新计时)\r\n"
@@ -185,6 +186,7 @@ static void WriteLog(const wchar_t* format, ...) {
 }
 
 static const wchar_t* COL_LABELS[4] = { L"#", L"标题", L"专辑", L"时长" };
+// 列宽: # / 标题 / 专辑 / 时长; 标题列为自适应列(在 LayoutControls 中随窗口宽度伸缩), 其余为固定值
 static const int COL_WIDTHS[4] = { 40, 280, 180, 80 };
 
 // Hotkey key names by array position (0-6)
@@ -877,6 +879,15 @@ private:
 
         // Listview
         SetWindowPos(m_playlistLV, NULL, M, lvY, w - 2 * M, listH, SWP_NOZORDER);
+
+        // 标题列(索引 1)自适应填满剩余宽度, # / 专辑 / 时长保持固定
+        {
+            RECT lvrc;
+            GetClientRect(m_playlistLV, &lvrc);
+            int titleW = (lvrc.right - lvrc.left) - (COL_WIDTHS[0] + COL_WIDTHS[2] + COL_WIDTHS[3]);
+            if (titleW < 120) titleW = 120;
+            ListView_SetColumnWidth(m_playlistLV, 1, titleW);
+        }
 
         // Control panel at bottom (created before buttons, so naturally behind them)
         SetWindowPos(m_ctrlPanel, NULL, 0, panelY, w, ctrlPanelH, SWP_NOZORDER);

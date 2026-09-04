@@ -59,6 +59,8 @@ constexpr UINT WM_APP_BRING_TO_TOP = WM_USER + 103;
 // Timer IDs
 constexpr UINT_PTR TIMER_ID_SEEK   = 3001;
 constexpr UINT_PTR TIMER_ID_DURATION_SCAN = 3002;
+constexpr UINT_PTR TIMER_ID_TRAY_READD = 3003;
+constexpr UINT_PTR TIMER_ID_TRAY_WATCHDOG = 3004;
 
 // Resource ID (must be #define — RC compiler doesn't understand constexpr)
 #define IDI_APP_ICON 101

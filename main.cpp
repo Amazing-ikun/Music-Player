@@ -5,10 +5,14 @@
 #include <commctrl.h>
 
 // MusicPlayer version
-static const wchar_t* APP_VERSION = L"1.4.5";
+static const wchar_t* APP_VERSION = L"1.4.6";
 
 // Changelog — shown in the About dialog
 static const wchar_t* CHANGELOG =
+    L"v1.4.6\r\n"
+    L"  - 修复: 重启 Windows 资源管理器后托盘图标消失且无法自动恢复 (根因: Win11/第三方任务栏不广播 TaskbarCreated, 依赖该消息的重加从未触发; 改为 5 秒周期性心跳, 用 NIM_MODIFY 重新断言图标、失败即 NIM_ADD, 并清除 NIS_HIDDEN 隐藏位强制图标可见)\r\n"
+    L"  - 修复 .error.log 中\"WriteLog 的落盘格式跟项目其它文件不一致\"的问题。现在空文件先写 UTF-8 BOM，消息用已有的 WideToUtf8 转成 UTF-8 再写盘\r\n"
+    L"\r\n"
     L"v1.4.5\r\n"
     L"  - 新增: 设置 → 重新统计歌曲时长, 全量重扫歌单时长; 对比 .durations.txt 缓存自动跳过未变化歌曲, 扫描期间防重复触发\r\n"
     L"\r\n"
@@ -169,6 +173,13 @@ static void WriteLog(const wchar_t* format, ...) {
     HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE,
         FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return;
+
+    // 空文件先写 UTF-8 BOM, 便于文本编辑器正确识别编码
+    if (GetFileSize(hFile, NULL) == 0) {
+        const BYTE bomUtf8[] = { 0xEF, 0xBB, 0xBF };
+        DWORD written = 0;
+        WriteFile(hFile, bomUtf8, 3, &written, NULL);
+    }
     SetFilePointer(hFile, 0, NULL, FILE_END);
 
     time_t now = time(NULL);
@@ -182,11 +193,20 @@ static void WriteLog(const wchar_t* format, ...) {
     vswprintf(buf, 1024, format, args);
     va_end(args);
 
+    // 与项目其它文件一致, 用 UTF-8 落盘, 避免裸写 UTF-16LE 导致日志被读成乱码
+    std::string line = WideToUtf8(std::wstring(ts) + buf + L"\n");
     DWORD written = 0;
-    WriteFile(hFile, ts, (DWORD)(wcslen(ts) * sizeof(wchar_t)), &written, NULL);
-    WriteFile(hFile, buf, (DWORD)(wcslen(buf) * sizeof(wchar_t)), &written, NULL);
-    WriteFile(hFile, L"\n", 2, &written, NULL);
+    WriteFile(hFile, line.data(), (DWORD)line.size(), &written, NULL);
     CloseHandle(hFile);
+}
+
+static void Log(const wchar_t* fmt, ...) {
+    va_list a;
+    va_start(a, fmt);
+    wchar_t msg[512];
+    vswprintf(msg, 512, fmt, a);
+    va_end(a);
+    WriteLog(msg);
 }
 
 static const wchar_t* COL_LABELS[4] = { L"#", L"标题", L"专辑", L"时长" };
@@ -397,6 +417,7 @@ public:
         , m_shufflePos(0)
         , m_settingsAutoplay(1), m_settingsRememberProgress(true)
         , m_settingsTray(true), m_trayIconAdded(false), m_taskbarCreatedMsg(0)
+        , m_trayReaddAttempts(0), m_trayReaddActive(false)
         , m_balanceEnabled(true)
         , m_ctrlPanel(NULL)
         , m_listening(false), m_listenStartWall(0), m_saveTick(0), m_nextScheduled(-1)
@@ -483,6 +504,8 @@ private:
     bool m_settingsTray;
     bool m_trayIconAdded;
     UINT m_taskbarCreatedMsg; // "TaskbarCreated" 注册消息, 用于探测资源管理器重启
+    UINT m_trayReaddAttempts; // 资源管理器重启后延迟重加托盘图标的尝试次数
+    bool m_trayReaddActive;   // 重试定时器当前是否在运行
     bool m_balanceEnabled;   // 音量平衡
 
     // ---- Hotkeys ----
@@ -551,6 +574,8 @@ private:
             case WM_TIMER:
                 if (wp == TIMER_ID_SEEK) OnTimer();
                 else if (wp == TIMER_ID_DURATION_SCAN) OnTimerDurationScan();
+                else if (wp == TIMER_ID_TRAY_READD) OnTrayReaddTimer();
+                else if (wp == TIMER_ID_TRAY_WATCHDOG) OnTrayWatchdog();
                 return 0;
             case WM_HOTKEY:            OnGlobalHotkey((int)wp);     return 0;
             case WM_POWERBROADCAST:
@@ -585,9 +610,17 @@ private:
                     return 0;
                 }
                 if (msg == m_taskbarCreatedMsg && m_taskbarCreatedMsg != 0) {
-                    // 资源管理器重启后托盘图标被系统清除, 需重新添加
+                    // 资源管理器重启后托盘图标被系统清除。此时通知区往往尚未就绪,
+                    // 立即 NIM_ADD 容易失败或图标随后被再次清除, 故改为延迟重试。
                     m_trayIconAdded = false;
-                    AddTrayIcon();
+                    // 同一时间点的多次 TaskbarCreated 广播只启动一次重试定时器,
+                    // 避免反复重置定时器导致重加被无限推迟。
+                    if (!m_trayReaddActive) {
+                        m_trayReaddActive = true;
+                        m_trayReaddAttempts = 0;
+                        WriteLog(L"TaskbarCreated 消息已收到, 开始延迟重加托盘图标");
+                        SetTimer(m_hwnd, TIMER_ID_TRAY_READD, 1500, NULL);
+                    }
                     return 0;
                 }
                 return DefWindowProcW(m_hwnd, msg, wp, lp);
@@ -688,6 +721,7 @@ private:
 
         RegisterHotKeys();
         AddTrayIcon();
+        SetTimer(m_hwnd, TIMER_ID_TRAY_WATCHDOG, 5000, NULL);  // 周期性心跳, 兜底恢复托盘图标
         UpdateUI();
     }
 
@@ -3086,16 +3120,61 @@ private:
         CloseHandle(hFile);
     }
 
-    
+
     // Tray icon
-    
+
+    // 资源管理器重启后延迟重加托盘图标: 通知区重建需要时间, 立即 NIM_ADD
+    // 可能失败或图标被系统随后清除, 因此每隔 1.5 秒强制重加一次, 最多 12 次
+    // (约 18 秒, 覆盖资源管理器 3~5 秒的重建/复位窗口)。
+    void OnTrayReaddTimer() {
+        if (++m_trayReaddAttempts >= 12) {
+            KillTimer(m_hwnd, TIMER_ID_TRAY_READD);
+            m_trayReaddActive = false;
+        }
+        // 先删后加: 即使 shell 已无该图标, NIM_DELETE 也无害, 可强制清理可能残留的旧状态
+        NOTIFYICONDATAW del = {};
+        del.cbSize = sizeof(del);
+        del.hWnd = m_hwnd;
+        del.uID = 1;
+        Shell_NotifyIconW(NIM_DELETE, &del);
+        m_trayIconAdded = false;  // 即使上次已成功也强制重加, 防止图标再次被系统清除
+        AddTrayIcon();
+    }
+
+    // 周期性心跳: 不依赖 TaskbarCreated (Win11 及第三方任务栏可能不广播该消息),
+    // 每 5 秒用 NIM_MODIFY 重新断言图标存在并保持可见; 若图标已被系统清除则 NIM_MODIFY
+    // 失败, 借此探测并重新 NIM_ADD。
+    void OnTrayWatchdog() {
+        if (!m_trayIconAdded) {
+            AddTrayIcon();
+            return;
+        }
+        NOTIFYICONDATAW nid = {};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = m_hwnd;
+        nid.uID = 1;
+        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_STATE;
+        nid.dwState = 0;
+        nid.dwStateMask = NIS_HIDDEN;  // 清除隐藏位, 强制图标显示在通知区而非被折叠隐藏
+        nid.uCallbackMessage = WM_APP_TRAY;
+        nid.hIcon = LoadIconW(m_hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
+        BuildTrayTipText(nid.szTip, 128);
+        if (!Shell_NotifyIconW(NIM_MODIFY, &nid)) {
+            WriteLog(L"Watchdog: NIM_MODIFY 失败, 图标已被系统清除, 重新 NIM_ADD");
+            m_trayIconAdded = false;
+            AddTrayIcon();
+        }
+    }
+
     void AddTrayIcon() {
         if (m_trayIconAdded) return;
         NOTIFYICONDATAW nid = {};
         nid.cbSize = sizeof(nid);
         nid.hWnd = m_hwnd;
         nid.uID = 1;
-        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_STATE;
+        nid.dwState = 0;
+        nid.dwStateMask = NIS_HIDDEN;  // 清除隐藏位, 强制图标显示在通知区而非被折叠隐藏
         nid.uCallbackMessage = WM_APP_TRAY;
         nid.hIcon = LoadIconW(m_hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
         BuildTrayTipText(nid.szTip, 128);
@@ -3104,6 +3183,7 @@ private:
             return;
         }
         m_trayIconAdded = true;
+        WriteLog(L"Shell_NotifyIconW NIM_ADD ok");
     }
 
     void RemoveTrayIcon() {

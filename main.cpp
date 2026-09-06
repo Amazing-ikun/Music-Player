@@ -5,10 +5,21 @@
 #include <commctrl.h>
 
 // MusicPlayer version
-static const wchar_t* APP_VERSION = L"1.4.6";
+static const wchar_t* APP_VERSION = L"2.0.0";
 
 // Changelog — shown in the About dialog
 static const wchar_t* CHANGELOG =
+    L"v2.0.0\r\n"
+    L"  - 新增: 桌面歌词悬浮窗 (置顶、无边框、GDI+ 逐像素半透明渲染, 鼠标移开 5 秒后背景透明仅显示歌词)\r\n"
+    L"  - 新增: 本地 .lrc 歌词解析 (自动识别 UTF-8/UTF-16/GBK 编码, 支持多时间戳与 offset 偏移)\r\n"
+    L"  - 新增: 双语歌词 (同一时间戳第 2 行为译文, 可切换显示/隐藏, 原文在上译文在下)\r\n"
+    L"  - 新增: 当前句 + 下一句两行显示, 长歌词超宽时横向滚动(走马灯)\r\n"
+    L"  - 新增: 悬浮窗可拖动、自由缩放(高度↔首行/次行字号等比联动)、锁定模式(仅歌词、禁止拖拽缩放、命中范围收紧到字幕)\r\n"
+    L"  - 新增: 歌词匹配 (文件菜单「扫描歌词」统计同目录同名 .lrc; 歌曲右键「匹配歌词」手动选择 .lrc)\r\n"
+    L"  - 新增: 歌词设置 (首行/次行字号、首行/次行颜色, 颜色支持十六进制与 RGB 输入)\r\n"
+    L"  - 新增: 主界面「词」按钮与托盘菜单开关桌面歌词; 悬浮窗右键菜单(居中/锁定/显示译文/上一首/下一首/隐藏)\r\n"
+    L"  - 修复: 歌词按时间戳排序不稳定导致原文/译文顺序颠倒 (改用稳定排序)\r\n"
+    L"\r\n"
     L"v1.4.6\r\n"
     L"  - 修复: 重启 Windows 资源管理器后托盘图标消失且无法自动恢复 (根因: Win11/第三方任务栏不广播 TaskbarCreated, 依赖该消息的重加从未触发; 改为 5 秒周期性心跳, 用 NIM_MODIFY 重新断言图标、失败即 NIM_ADD, 并清除 NIS_HIDDEN 隐藏位强制图标可见)\r\n"
     L"  - 修复 .error.log 中\"WriteLog 的落盘格式跟项目其它文件不一致\"的问题。现在空文件先写 UTF-8 BOM，消息用已有的 WideToUtf8 转成 UTF-8 再写盘\r\n"
@@ -94,6 +105,7 @@ static const wchar_t* CHANGELOG =
 #include "AudioEngine.h"
 #include "PlaylistManager.h"
 #include "ListeningHistory.h"
+#include "LyricWindow.h"
 #include <chrono>
 
 namespace {
@@ -158,6 +170,66 @@ static std::wstring GetDisplayName(const std::wstring& path) {
             file = file.substr(0, dot);
     }
     return file;
+}
+
+// 取文件名 (去目录、去任意扩展名)
+static std::wstring BaseNameNoExt(const std::wstring& path) {
+    size_t slash = path.find_last_of(L"\\/");
+    std::wstring file = (slash == std::wstring::npos) ? path : path.substr(slash + 1);
+    size_t dot = file.rfind(L'.');
+    if (dot != std::wstring::npos) file = file.substr(0, dot);
+    return file;
+}
+
+// 忽略大小写, 只要一方文件名包含另一方即视为「匹配」(不弹确认)
+static bool NamesDifferTooMuch(const std::wstring& song, const std::wstring& lrc) {
+    std::wstring a = song, b = lrc;
+    for (auto& c : a) c = towlower(c);
+    for (auto& c : b) c = towlower(c);
+    if (a.empty() || b.empty()) return false;
+    return (a.find(b) == std::wstring::npos && b.find(a) == std::wstring::npos);
+}
+
+// 解析颜色: 支持十六进制 (#RRGGBB / RRGGBB) 与 RGB (R,G,B 或 R G B); 失败返回 false
+static bool ParseColor(const std::wstring& input, COLORREF& out) {
+    std::wstring s = input;
+    size_t b = 0, e = s.size();
+    while (b < e && iswspace(s[b])) b++;
+    while (e > b && iswspace(s[e - 1])) e--;
+    s = s.substr(b, e - b);
+    if (s.empty()) return false;
+    if (s[0] == L'#') s = s.substr(1);
+    if (s.empty()) return false;
+
+    // RGB: r,g,b 或 r g b
+    int r = 0, g = 0, bl = 0;
+    if (swscanf(s.c_str(), L"%d,%d,%d", &r, &g, &bl) == 3 ||
+        swscanf(s.c_str(), L"%d %d %d", &r, &g, &bl) == 3) {
+        if (r < 0 || r > 255 || g < 0 || g > 255 || bl < 0 || bl > 255) return false;
+        out = RGB(r, g, bl);
+        return true;
+    }
+    // 十六进制: 6 位 RRGGBB
+    if (s.size() == 6) {
+        unsigned v = 0;
+        bool ok = true;
+        for (wchar_t c : s) {
+            if (!((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') || (c >= L'A' && c <= L'F'))) { ok = false; break; }
+            v = v * 16 + (c >= L'0' && c <= L'9' ? c - L'0' : (towlower(c) - L'a' + 10));
+        }
+        if (ok) {
+            out = RGB((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
+            return true;
+        }
+    }
+    return false;
+}
+
+// COLORREF → "#RRGGBB" 十六进制字符串
+static std::wstring ColorToHex(COLORREF c) {
+    wchar_t buf[16];
+    swprintf(buf, 16, L"#%02X%02X%02X", GetRValue(c), GetGValue(c), GetBValue(c));
+    return buf;
 }
 
 static std::wstring GetExeDirectory() {
@@ -316,6 +388,7 @@ class MainWindow;
 struct HKDlgCtx { HotkeyBinding* bindings; int recording; int count; MainWindow* win; int result; };
 
 static LRESULT CALLBACK HotkeyDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
+static LRESULT CALLBACK LyricsSettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
 
 struct StatsDlgCtx;
 struct StatsDlgCtx {
@@ -409,6 +482,7 @@ public:
         , m_playlistLV(NULL), m_searchEdit(NULL)
         , m_btnPrev(NULL), m_btnPlay(NULL), m_btnNext(NULL), m_btnMode(NULL), m_btnLocate(NULL)
         , m_btnMute(NULL)
+        , m_btnLyrics(NULL)
         , m_trackSeek(NULL), m_sliderVol(NULL), m_staticVolPct(NULL)
         , m_lastVol(80)
         , m_staticTime(NULL), m_staticSong(NULL)
@@ -419,6 +493,13 @@ public:
         , m_settingsTray(true), m_trayIconAdded(false), m_taskbarCreatedMsg(0)
         , m_trayReaddAttempts(0), m_trayReaddActive(false)
         , m_balanceEnabled(true)
+        , m_settingsLyricsShow(false)
+        , m_settingsLyricsLocked(false)
+        , m_settingsLyricsTranslation(false)
+        , m_lyricsColor(RGB(255, 255, 255))
+        , m_lyricsNextColor(RGB(150, 150, 150))
+        , m_lyricsFontSize(30)
+        , m_lyricsSecondFontSize(20)
         , m_ctrlPanel(NULL)
         , m_listening(false), m_listenStartWall(0), m_saveTick(0), m_nextScheduled(-1)
         , m_undoValid(false)
@@ -480,6 +561,7 @@ private:
     HWND m_searchEdit;
     HWND m_btnPrev, m_btnPlay, m_btnNext, m_btnMode, m_btnLocate;
     HWND m_btnMute;
+    HWND m_btnLyrics;
     HWND m_trackSeek, m_sliderVol, m_staticVolPct;
     HWND m_staticTime, m_staticSong;
     HWND m_ctrlPanel;
@@ -507,6 +589,18 @@ private:
     UINT m_trayReaddAttempts; // 资源管理器重启后延迟重加托盘图标的尝试次数
     bool m_trayReaddActive;   // 重试定时器当前是否在运行
     bool m_balanceEnabled;   // 音量平衡
+
+    // ---- Desktop lyrics ----
+    LyricParser m_lyrics;
+    LyricWindow m_lyricWindow;
+    bool m_settingsLyricsShow;
+    bool m_settingsLyricsLocked;       // 锁定(仅歌词、不可拖拽缩放)
+    bool m_settingsLyricsTranslation;  // 是否显示译文
+    COLORREF m_lyricsColor;    // 首行颜色
+    COLORREF m_lyricsNextColor;// 次行颜色
+    int m_lyricsFontSize;      // 首行字号(像素)
+    int m_lyricsSecondFontSize;// 次行字号(像素)
+    std::map<std::wstring, std::wstring> m_lyricsMap;  // 歌曲路径 → lrc 路径
 
     // ---- Hotkeys ----
     HotkeyBinding m_hotkeys[7];
@@ -601,6 +695,16 @@ private:
                 }
                 return DefWindowProcW(m_hwnd, msg, wp, lp);
             }
+            case WM_CTLCOLORBTN: {
+                // 「词」按钮灰度差异化: 关闭时灰字, 开启时黑字
+                if ((HWND)lp == m_btnLyrics) {
+                    HDC hdc = (HDC)wp;
+                    SetTextColor(hdc, m_settingsLyricsShow ? RGB(0, 0, 0) : RGB(150, 150, 150));
+                    SetBkMode(hdc, TRANSPARENT);
+                    return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
+                }
+                return DefWindowProcW(m_hwnd, msg, wp, lp);
+            }
             default:
                 if (msg == WM_USER_SONG_END) { OnSongEnd(); return 0; }
                 if (msg == WM_APP_TRAY) { HandleTrayMessage(wp, lp); return 0; }
@@ -674,10 +778,12 @@ private:
         m_history.Load(GetExeDirectory() + L"\\.history.txt");
         m_audio.SetNotifyWindow(m_hwnd, WM_USER_SONG_END);
         m_audio.SetFadeNotify(m_hwnd, WM_APP_FADE_DONE);
+        LoadLyricsMap();
 
         bool startPlay = (m_settingsAutoplay == 1);
         if (m_settingsRememberProgress && !m_playlist.IsEmpty()) {
             if (LoadLastSong()) {
+                LoadLyricsForCurrentSong();
                 if (m_audio.IsBalanceEnabled()) {
                     m_audio.ApplyBalance();
                 }
@@ -722,6 +828,37 @@ private:
         RegisterHotKeys();
         AddTrayIcon();
         SetTimer(m_hwnd, TIMER_ID_TRAY_WATCHDOG, 5000, NULL);  // 周期性心跳, 兜底恢复托盘图标
+        // 桌面歌词: 设置右键隐藏回调, 同步按钮状态, 并按上次状态恢复显示
+        m_lyricWindow.SetHideCallback([this]() { SetLyricsVisible(false); });
+        m_lyricWindow.SetFontSizeChangedCallback([this](int fs) {
+            m_lyricsFontSize = fs;
+            SaveSettings();
+        });
+        m_lyricWindow.SetSecondFontSizeChangedCallback([this](int fs) {
+            m_lyricsSecondFontSize = fs;
+            SaveSettings();
+        });
+        m_lyricWindow.SetPrevNextCallback([this](bool next) {
+            if (next) OnNext(); else OnPrev();
+        });
+        m_lyricWindow.SetLockedChangedCallback([this](bool locked) {
+            m_settingsLyricsLocked = locked;
+            SaveSettings();
+        });
+        m_lyricWindow.SetTranslationChangedCallback([this](bool show) {
+            m_settingsLyricsTranslation = show;
+            SaveSettings();
+        });
+        m_lyricWindow.SetLocked(m_settingsLyricsLocked);
+        m_lyricWindow.SetShowTranslation(m_settingsLyricsTranslation);
+        m_lyricWindow.SetColor(m_lyricsColor);
+        m_lyricWindow.SetNextColor(m_lyricsNextColor);
+        m_lyricWindow.SetFontSize(m_lyricsFontSize);
+        m_lyricWindow.SetSecondFontSize(m_lyricsSecondFontSize);
+        UpdateLyricButton();
+        if (m_settingsLyricsShow) {
+            ShowLyricWindow();
+        }
         UpdateUI();
     }
 
@@ -743,6 +880,7 @@ private:
         SaveSettings();
         UnregisterHotKeys();
         RemoveTrayIcon();
+        m_lyricWindow.Destroy();
         m_audio.Cleanup();
         DestroyWindow(m_hwnd);
     }
@@ -754,6 +892,7 @@ private:
         HMENU fileMenu = CreatePopupMenu();
         AppendMenuW(fileMenu, MF_STRING, ID_FILE_OPENFOLDER, L"打开文件夹(&O)...");
         AppendMenuW(fileMenu, MF_STRING, ID_FILE_ADDFILES, L"添加歌曲(&A)...");
+        AppendMenuW(fileMenu, MF_STRING, ID_FILE_MATCH_LYRICS, L"扫描歌词(&M)");
         AppendMenuW(fileMenu, MF_STRING, ID_FILE_EXPORT_PLAYLIST, L"导出歌单(&E)...");
         AppendMenuW(fileMenu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(fileMenu, MF_STRING | MF_GRAYED, ID_UNDO_REMOVE, L"撤销移除(&U)");
@@ -772,6 +911,10 @@ private:
             L"最小化到托盘");
         AppendMenuW(m_settingsMenu, MF_STRING | MF_CHECKED, ID_SETTINGS_BALANCE,
             L"音量平衡(&B)");
+        AppendMenuW(m_settingsMenu, MF_STRING, ID_SETTINGS_LYRICS,
+            L"桌面歌词(&L)");
+        AppendMenuW(m_settingsMenu, MF_STRING, ID_SETTINGS_LYRICS_OPTIONS,
+            L"歌词设置...");
         AppendMenuW(m_settingsMenu, MF_SEPARATOR, 0, NULL);
 
         m_playSubMenu = CreatePopupMenu();
@@ -865,6 +1008,10 @@ private:
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             0, 0, 0, 0, m_hwnd, (HMENU)IDC_BTN_MUTE, m_hInst, NULL);
 
+        m_btnLyrics = CreateWindowExW(0, L"BUTTON", L"词",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_PUSHLIKE,
+            0, 0, 0, 0, m_hwnd, (HMENU)IDC_BTN_LYRICS, m_hInst, NULL);
+
         m_staticVolPct = CreateWindowExW(0, L"STATIC", L"80%",
             WS_CHILD | WS_VISIBLE | SS_CENTER,
             0, 0, 0, 0, m_hwnd, (HMENU)IDC_STAT_VOL, m_hInst, NULL);
@@ -890,7 +1037,7 @@ private:
             WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
             0, 0, 0, 0, m_hwnd, (HMENU)IDC_STAT_SONG, m_hInst, NULL);
 
-        HWND ctls[] = { m_btnMode, m_btnPrev, m_btnPlay, m_btnNext, m_btnLocate, m_btnMute,
+        HWND ctls[] = { m_btnMode, m_btnPrev, m_btnPlay, m_btnNext, m_btnLocate, m_btnMute, m_btnLyrics,
                         m_sliderVol, m_trackSeek, m_staticVolPct,
                         m_staticTime, m_staticSong };
         for (auto c : ctls) SendMessageW(c, WM_SETFONT, (WPARAM)m_hFont, TRUE);
@@ -953,9 +1100,11 @@ private:
         SetWindowPos(m_btnLocate, NULL, bx, y + 4, 36, BH, SWP_NOZORDER);
 
         int muteW = 26;
+        int lyricW = 36;
         int volPctW = 36;
         int volW = 130;
         int volX = w - M - volPctW - volW - muteW - 4;
+        SetWindowPos(m_btnLyrics, NULL, volX - lyricW - 4, y + 4, lyricW, BH, SWP_NOZORDER);
         SetWindowPos(m_btnMute, NULL, volX, y + 4, muteW, BH, SWP_NOZORDER);
         SetWindowPos(m_staticVolPct, NULL, volX + muteW + 4, y + 6, volPctW, 20, SWP_NOZORDER);
         SetWindowPos(m_sliderVol, NULL, volX + muteW + 4 + volPctW, y + 4, volW, BH, SWP_NOZORDER);
@@ -999,6 +1148,7 @@ private:
             switch (id) {
                 case ID_FILE_OPENFOLDER:      OpenFolder(); break;
                 case ID_FILE_ADDFILES:        AddFiles();   break;
+                case ID_FILE_MATCH_LYRICS:    MatchLyricsForAll(); break;
                 case ID_FILE_EXPORT_PLAYLIST: ExportPlaylist(); break;
                 case ID_UNDO_REMOVE:          UndoRemove();     break;
                 case ID_FILE_EXIT:            OnRealClose(); break;
@@ -1025,6 +1175,12 @@ private:
                     m_audio.SetBalanceEnabled(m_balanceEnabled);
                     UpdateSettingsMenu();
                     SaveSettings();
+                    break;
+                case ID_SETTINGS_LYRICS:
+                    SetLyricsVisible(!m_settingsLyricsShow);
+                    break;
+                case ID_SETTINGS_LYRICS_OPTIONS:
+                    ShowLyricsSettingsDialog();
                     break;
                 case ID_SETTINGS_HOTKEYS:
                     ShowHotkeyDialog();
@@ -1077,6 +1233,7 @@ private:
                 else if (hCtrl == m_btnMode) OnCycleMode();
                 else if (hCtrl == m_btnLocate) LocateCurrentSong();
                 else if (hCtrl == m_btnMute) ToggleMute();
+                else if (hCtrl == m_btnLyrics) SetLyricsVisible(SendMessageW(m_btnLyrics, BM_GETCHECK, 0, 0) == BST_CHECKED);
             } else if (code == EN_CHANGE && hCtrl == m_searchEdit) {
                 OnSearchChanged();
             }
@@ -1187,6 +1344,7 @@ private:
 
                     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
                     AppendMenuW(hMenu, MF_STRING, 3103, L"在文件管理器中定位(&L)");
+                    AppendMenuW(hMenu, MF_STRING, 3106, L"匹配歌词(&M)");
                     AppendMenuW(hMenu, MF_STRING, 3104, L"从列表中移除(&R)");
                     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
                     AppendMenuW(hMenu, MF_STRING, 3105, L"属性(&T)");
@@ -1211,6 +1369,7 @@ private:
                                 ShellExecuteW(NULL, L"open", L"explorer.exe", param.c_str(), NULL, SW_SHOWNORMAL);
                                 break;
                             }
+                            case 3106: MatchLyricsForSong(songIdx); break;
                             case 3104: {
                                 if (m_nextScheduled == songIdx)
                                     m_nextScheduled = -1;
@@ -1322,6 +1481,9 @@ private:
         if (m_audio.IsLoaded() && !m_userDraggingSeek) {
             UpdateSeekDisplay();
             UpdateTimeDisplay();
+            if (m_lyricWindow.Visible()) {
+                m_lyricWindow.SetCurrentIndex(m_lyrics.FindIndex(m_audio.GetPosition()));
+            }
             if (++m_saveTick >= 20) {
                 m_saveTick = 0;
                 if (m_settingsRememberProgress)
@@ -1754,6 +1916,8 @@ private:
             MF_BYCOMMAND | (m_settingsTray ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(m_settingsMenu, ID_SETTINGS_BALANCE,
             MF_BYCOMMAND | (m_balanceEnabled ? MF_CHECKED : MF_UNCHECKED));
+        CheckMenuItem(m_settingsMenu, ID_SETTINGS_LYRICS,
+            MF_BYCOMMAND | (m_settingsLyricsShow ? MF_CHECKED : MF_UNCHECKED));
     }
 
 
@@ -2593,6 +2757,7 @@ private:
         }
 
         m_currentIndex = index;
+        LoadLyricsForCurrentSong();
         if (m_audio.IsBalanceEnabled()) {
             m_audio.ApplyBalance();   // 首次播放该歌曲时测量响度, 之后命中缓存
         }
@@ -3060,14 +3225,21 @@ private:
             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile == INVALID_HANDLE_VALUE) return;
         DWORD written;
-        char buf[200];
-        int len = sprintf(buf, "autoplay=%d\nremember_progress=%d\ntray_minimize=%d\nplay_mode=%d\nplay_speed=%.2f\nloudness_balance=%d\n",
+        char buf[300];
+        int len = sprintf(buf, "autoplay=%d\nremember_progress=%d\ntray_minimize=%d\nplay_mode=%d\nplay_speed=%.2f\nloudness_balance=%d\nlyrics_show=%d\nlyrics_color=#%02X%02X%02X\nlyrics_nextcolor=#%02X%02X%02X\nlyrics_locked=%d\nlyrics_translation=%d\nlyrics_fontsize=%d\nlyrics_secondfontsize=%d\n",
                           m_settingsAutoplay,
                           m_settingsRememberProgress ? 1 : 0,
                           m_settingsTray ? 1 : 0,
                           (int)m_audio.GetPlayMode(),
                           m_audio.GetSpeed(),
-                          m_balanceEnabled ? 1 : 0);
+                          m_balanceEnabled ? 1 : 0,
+                          m_settingsLyricsShow ? 1 : 0,
+                          (unsigned)GetRValue(m_lyricsColor), (unsigned)GetGValue(m_lyricsColor), (unsigned)GetBValue(m_lyricsColor),
+                          (unsigned)GetRValue(m_lyricsNextColor), (unsigned)GetGValue(m_lyricsNextColor), (unsigned)GetBValue(m_lyricsNextColor),
+                          m_settingsLyricsLocked ? 1 : 0,
+                          m_settingsLyricsTranslation ? 1 : 0,
+                          m_lyricsFontSize,
+                          m_lyricsSecondFontSize);
         WriteFile(hFile, buf, (DWORD)len, &written, NULL);
         CloseHandle(hFile);
     }
@@ -3084,6 +3256,11 @@ private:
         DWORD size = GetFileSize(hFile, NULL);
         int mode = 0;
         int balanceEnabled = 1;
+        int lyricsShow = 0;
+        int lyricsLocked = 0;
+        int lyricsTranslation = 0;
+        int lyricsFontSize = 30;
+        int lyricsSecondFontSize = 20;
         double speed = 1.0;
         if (size > 0 && size < 2048) {
             char buf[2048] = {};
@@ -3101,6 +3278,37 @@ private:
                     else if (sscanf(p, "loudness_balance=%d", &balanceEnabled) == 1) {
                         m_balanceEnabled = (balanceEnabled != 0);
                         m_audio.SetBalanceEnabled(m_balanceEnabled);
+                    }
+                    else if (sscanf(p, "lyrics_show=%d", &lyricsShow) == 1) {
+                        m_settingsLyricsShow = (lyricsShow != 0);
+                    }
+                    else if (strncmp(p, "lyrics_color=", 13) == 0) {
+                        std::wstring hex;
+                        for (char* q = p + 13; *q; ++q) hex += (wchar_t)(unsigned char)*q;
+                        COLORREF c;
+                        if (ParseColor(hex, c)) m_lyricsColor = c;
+                    }
+                    else if (strncmp(p, "lyrics_nextcolor=", 17) == 0) {
+                        std::wstring hex;
+                        for (char* q = p + 17; *q; ++q) hex += (wchar_t)(unsigned char)*q;
+                        COLORREF c;
+                        if (ParseColor(hex, c)) m_lyricsNextColor = c;
+                    }
+                    else if (sscanf(p, "lyrics_locked=%d", &lyricsLocked) == 1) {
+                        m_settingsLyricsLocked = (lyricsLocked != 0);
+                    }
+                    else if (sscanf(p, "lyrics_translation=%d", &lyricsTranslation) == 1) {
+                        m_settingsLyricsTranslation = (lyricsTranslation != 0);
+                    }
+                    else if (sscanf(p, "lyrics_fontsize=%d", &lyricsFontSize) == 1) {
+                        m_lyricsFontSize = lyricsFontSize;
+                        if (m_lyricsFontSize < 12) m_lyricsFontSize = 12;
+                        if (m_lyricsFontSize > 72) m_lyricsFontSize = 72;
+                    }
+                    else if (sscanf(p, "lyrics_secondfontsize=%d", &lyricsSecondFontSize) == 1) {
+                        m_lyricsSecondFontSize = lyricsSecondFontSize;
+                        if (m_lyricsSecondFontSize < 12) m_lyricsSecondFontSize = 12;
+                        if (m_lyricsSecondFontSize > 72) m_lyricsSecondFontSize = 72;
                     }
                     else if (sscanf(p, "play_mode=%d", &mode) == 1) {
                         if (mode >= 0 && mode <= 2) {
@@ -3120,6 +3328,240 @@ private:
         CloseHandle(hFile);
     }
 
+
+    // Desktop lyrics
+
+    // 切歌时加载当前歌曲的 .lrc 歌词并刷新悬浮窗
+    void LoadLyricsForCurrentSong() {
+        m_lyrics.Clear();
+        std::wstring emptyText = L"暂无歌词";
+        if (m_currentIndex >= 0 && m_currentIndex < m_playlist.GetCount()) {
+            const std::wstring& songPath = m_playlist.GetFile(m_currentIndex);
+            auto it = m_lyricsMap.find(songPath);
+            if (it != m_lyricsMap.end() && !it->second.empty()) {
+                // 有显式映射: 校验文件是否存在; 失效则不回退, 显示「未找到歌词」
+                if (GetFileAttributesW(it->second.c_str()) != INVALID_FILE_ATTRIBUTES)
+                    m_lyrics.LoadFile(it->second);
+                else
+                    emptyText = L"未找到歌词/无效的歌词";
+            } else {
+                // 无映射: 同目录同名兜底
+                std::wstring lrc = FindLrcFile(songPath);
+                if (!lrc.empty()) m_lyrics.LoadFile(lrc);
+            }
+        }
+        m_lyricWindow.SetEmptyText(emptyText);
+        m_lyricWindow.SetLyrics(m_lyrics);
+        m_lyricWindow.SetCurrentIndex(m_lyrics.FindIndex(m_audio.GetPosition()));
+    }
+
+    // 显示桌面歌词悬浮窗 (首次时创建)
+    void ShowLyricWindow() {
+        if (!m_lyricWindow.Hwnd() && !m_lyricWindow.Create(m_hInst)) return;
+        m_lyricWindow.SetLyrics(m_lyrics);
+        m_lyricWindow.SetCurrentIndex(m_lyrics.FindIndex(m_audio.GetPosition()));
+        m_lyricWindow.Show();
+    }
+
+    // 同步「词」按钮勾选状态
+    void UpdateLyricButton() {
+        if (m_btnLyrics) {
+            SendMessageW(m_btnLyrics, BM_SETCHECK, m_settingsLyricsShow ? BST_CHECKED : BST_UNCHECKED, 0);
+            InvalidateRect(m_btnLyrics, NULL, TRUE);
+        }
+    }
+
+    // 统一设置桌面歌词显示状态 (按钮/菜单/托盘/右键共用)
+    void SetLyricsVisible(bool on) {
+        m_settingsLyricsShow = on;
+        if (on) ShowLyricWindow();
+        else m_lyricWindow.Hide();
+        UpdateLyricButton();
+        UpdateSettingsMenu();
+    }
+
+    // 扫描报告: 统计歌单里有多少首能在同目录找到同名 .lrc (不写映射表, 播放时实时兜底)
+    void MatchLyricsForAll() {
+        int found = 0;
+        for (int i = 0; i < m_playlist.GetCount(); ++i) {
+            if (!FindLrcFile(m_playlist.GetFile(i)).empty()) found++;
+        }
+        MessageBoxW(m_hwnd,
+            (L"共 " + std::to_wstring(m_playlist.GetCount()) + L" 首歌曲，其中 "
+             + std::to_wstring(found) + L" 首能在同目录找到同名歌词。").c_str(),
+            L"匹配歌词", MB_OK | MB_ICONINFORMATION);
+    }
+
+    // 手动为单首歌曲选择 .lrc
+    void MatchLyricsForSong(int songIdx) {
+        if (songIdx < 0 || songIdx >= m_playlist.GetCount()) return;
+        const std::wstring& songPath = m_playlist.GetFile(songIdx);
+
+        wchar_t file[1024] = {};
+        OPENFILENAMEW ofn = {};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = m_hwnd;
+        ofn.lpstrFilter = L"歌词文件 (*.lrc)\0*.lrc\0所有文件 (*.*)\0*.*\0";
+        ofn.lpstrFile = file;
+        ofn.nMaxFile = 1024;
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+        ofn.lpstrTitle = L"选择歌词文件";
+        if (!GetOpenFileNameW(&ofn)) return;  // 用户取消
+
+        std::wstring lrcPath = file;
+
+        if (NamesDifferTooMuch(BaseNameNoExt(songPath), BaseNameNoExt(lrcPath))) {
+            int r = MessageBoxW(m_hwnd,
+                L"您选择的歌词文件名与歌曲名似乎不匹配，要继续吗？",
+                L"匹配歌词", MB_YESNO | MB_ICONQUESTION);
+            if (r != IDYES) return;
+        }
+
+        m_lyricsMap[songPath] = lrcPath;
+        SaveLyricsMap();
+        if (m_currentIndex == songIdx) LoadLyricsForCurrentSong();
+        MessageBoxW(m_hwnd, L"歌词匹配成功。", L"匹配歌词", MB_OK | MB_ICONINFORMATION);
+    }
+
+    void SaveLyricsMap() {
+        std::wstring filePath = GetExeDirectory() + L"\\.lyrics_map.txt";
+        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return;
+        DWORD written;
+        const WORD bom = 0xFEFF;
+        WriteFile(hFile, &bom, 2, &written, NULL);
+        for (auto& kv : m_lyricsMap) {
+            std::wstring line = kv.first + L"|" + kv.second + L"\n";
+            WriteFile(hFile, line.c_str(), (DWORD)(line.size() * sizeof(wchar_t)), &written, NULL);
+        }
+        CloseHandle(hFile);
+    }
+
+    void LoadLyricsMap() {
+        m_lyricsMap.clear();
+        std::wstring filePath = GetExeDirectory() + L"\\.lyrics_map.txt";
+        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
+            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE) return;
+        DWORD size = GetFileSize(hFile, NULL);
+        if (size > 2) {
+            DWORD read = 0;
+            std::wstring buf(size / 2 + 1, L'\0');
+            ReadFile(hFile, &buf[0], size, &read, NULL);
+            buf[read / 2] = L'\0';
+            const wchar_t* p = buf.c_str();
+            if (*p == 0xFEFF) p++;
+            while (*p) {
+                const wchar_t* nl = wcschr(p, L'\n');
+                size_t lineLen = nl ? (size_t)(nl - p) : wcslen(p);
+                if (lineLen > 0 && p[lineLen - 1] == L'\r') --lineLen;
+                if (lineLen > 0) {
+                    std::wstring line(p, lineLen);
+                    size_t sep = line.find(L'|');
+                    if (sep != std::wstring::npos) {
+                        std::wstring song = line.substr(0, sep);
+                        std::wstring lrc = line.substr(sep + 1);
+                        if (!song.empty() && !lrc.empty()) m_lyricsMap[song] = lrc;
+                    }
+                }
+                p = nl ? nl + 1 : p + lineLen;
+            }
+        }
+        CloseHandle(hFile);
+    }
+
+    // 歌词设置对话框: 颜色(十六进制/RGB) + 字号
+    void ShowLyricsSettingsDialog() {
+        const wchar_t DLG_CLASS[] = L"LyricsSettingsDlg";
+        WNDCLASSEXW wc = {};
+        wc.cbSize        = sizeof(wc);
+        wc.style         = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc   = LyricsSettingsDlgProc;
+        wc.hInstance     = m_hInst;
+        wc.hIcon         = LoadIcon(NULL, IDI_APPLICATION);
+        wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = DLG_CLASS;
+        if (!RegisterClassExW(&wc)) return;
+
+        int dlgW = 400, dlgH = 270;
+        int sw = GetSystemMetrics(SM_CXSCREEN);
+        int sh = GetSystemMetrics(SM_CYSCREEN);
+        int x = (sw - dlgW) / 2, y = (sh - dlgH) / 2;
+
+        HWND hDlg = CreateWindowExW(0, DLG_CLASS, L"歌词设置",
+            WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+            x, y, dlgW, dlgH, m_hwnd, NULL, m_hInst, NULL);
+        if (!hDlg) return;
+
+        struct LyricCtx { MainWindow* win; bool ok; COLORREF color; COLORREF nextColor; int fontSize; int secondFontSize; };
+        LyricCtx* ctx = new LyricCtx{ this, false, m_lyricsColor, m_lyricsNextColor, m_lyricsFontSize, m_lyricsSecondFontSize };
+        SetWindowLongPtrW(hDlg, GWLP_USERDATA, (LONG_PTR)ctx);
+
+        CreateWindowExW(0, L"STATIC", L"颜色格式: #RRGGBB 或 R,G,B",
+            WS_CHILD | WS_VISIBLE, 15, 12, 370, 18, hDlg, NULL, m_hInst, NULL);
+
+        CreateWindowExW(0, L"STATIC", L"首行颜色:",
+            WS_CHILD | WS_VISIBLE, 15, 42, 150, 18, hDlg, NULL, m_hInst, NULL);
+        std::wstring hexCur = ColorToHex(m_lyricsColor);
+        CreateWindowExW(0, L"EDIT", hexCur.c_str(),
+            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_CENTER,
+            165, 40, 220, 26, hDlg, (HMENU)501, m_hInst, NULL);
+
+        CreateWindowExW(0, L"STATIC", L"次行颜色:",
+            WS_CHILD | WS_VISIBLE, 15, 76, 150, 18, hDlg, NULL, m_hInst, NULL);
+        std::wstring hexNext = ColorToHex(m_lyricsNextColor);
+        CreateWindowExW(0, L"EDIT", hexNext.c_str(),
+            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_CENTER,
+            165, 74, 220, 26, hDlg, (HMENU)503, m_hInst, NULL);
+
+        CreateWindowExW(0, L"STATIC", L"首行字号 (12 ~ 72):",
+            WS_CHILD | WS_VISIBLE, 15, 110, 150, 18, hDlg, NULL, m_hInst, NULL);
+        wchar_t szBuf[16];
+        swprintf(szBuf, 16, L"%d", m_lyricsFontSize);
+        CreateWindowExW(0, L"EDIT", szBuf,
+            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_CENTER,
+            165, 108, 220, 26, hDlg, (HMENU)502, m_hInst, NULL);
+
+        CreateWindowExW(0, L"STATIC", L"次行字号 (12 ~ 72):",
+            WS_CHILD | WS_VISIBLE, 15, 144, 150, 18, hDlg, NULL, m_hInst, NULL);
+        wchar_t szBuf2[16];
+        swprintf(szBuf2, 16, L"%d", m_lyricsSecondFontSize);
+        CreateWindowExW(0, L"EDIT", szBuf2,
+            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_CENTER,
+            165, 142, 220, 26, hDlg, (HMENU)504, m_hInst, NULL);
+
+        CreateWindowExW(0, L"BUTTON", L"确定",
+            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            dlgW / 2 - 95, 184, 80, 28, hDlg, (HMENU)IDOK, m_hInst, NULL);
+        CreateWindowExW(0, L"BUTTON", L"取消",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            dlgW / 2 + 15, 184, 80, 28, hDlg, (HMENU)IDCANCEL, m_hInst, NULL);
+
+        EnableWindow(m_hwnd, FALSE);
+        MSG msg;
+        while (IsWindow(hDlg) && GetMessageW(&msg, NULL, 0, 0)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        EnableWindow(m_hwnd, TRUE);
+        SetForegroundWindow(m_hwnd);
+
+        if (ctx->ok) {
+            m_lyricsColor = ctx->color;
+            m_lyricsNextColor = ctx->nextColor;
+            m_lyricsFontSize = ctx->fontSize;
+            m_lyricsSecondFontSize = ctx->secondFontSize;
+            m_lyricWindow.SetColor(m_lyricsColor);
+            m_lyricWindow.SetNextColor(m_lyricsNextColor);
+            m_lyricWindow.SetFontSize(m_lyricsFontSize);
+            m_lyricWindow.SetSecondFontSize(m_lyricsSecondFontSize);
+            SaveSettings();
+        }
+        delete ctx;
+        UnregisterClassW(DLG_CLASS, m_hInst);
+    }
 
     // Tray icon
 
@@ -3255,6 +3697,8 @@ private:
             AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
             AppendMenuW(popup, MF_STRING, ID_TRAY_RESTORE, L"显示窗口");
             AppendMenuW(popup, MF_STRING, ID_TRAY_MINIMIZE, L"最小化到托盘");
+            AppendMenuW(popup, MF_STRING | (m_settingsLyricsShow ? MF_CHECKED : MF_UNCHECKED),
+                ID_SETTINGS_LYRICS, m_settingsLyricsShow ? L"关闭桌面歌词" : L"开启桌面歌词");
             AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
             AppendMenuW(popup, MF_STRING, ID_TRAY_EXIT, L"退出");
             POINT pt;
@@ -3906,6 +4350,62 @@ static LRESULT CALLBACK SpeedInputDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM
             struct SpeedCtx { MainWindow* win; double result; };
             SpeedCtx* ctx = (SpeedCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
             if (ctx) ctx->result = val;
+            DestroyWindow(hDlg);
+            return 0;
+        }
+        if (id == IDCANCEL) {
+            DestroyWindow(hDlg);
+            return 0;
+        }
+    }
+    return DefWindowProcW(hDlg, msg, wp, lp);
+}
+
+static LRESULT CALLBACK LyricsSettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_CLOSE) {
+        DestroyWindow(hDlg);
+        return 0;
+    }
+    if (msg == WM_COMMAND) {
+        int id = LOWORD(wp);
+        if (id == IDOK) {
+            struct LyricCtx { MainWindow* win; bool ok; COLORREF color; COLORREF nextColor; int fontSize; int secondFontSize; };
+            LyricCtx* ctx = (LyricCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
+            if (ctx) {
+                wchar_t colorBuf[64];
+                GetWindowTextW(GetDlgItem(hDlg, 501), colorBuf, 64);
+                COLORREF color;
+                if (!ParseColor(colorBuf, color)) {
+                    MessageBoxW(hDlg, L"首行颜色格式无效，请输入 #RRGGBB 或 R,G,B", L"无效输入", MB_OK | MB_ICONWARNING);
+                    return 0;
+                }
+                wchar_t nextBuf[64];
+                GetWindowTextW(GetDlgItem(hDlg, 503), nextBuf, 64);
+                COLORREF nextColor;
+                if (!ParseColor(nextBuf, nextColor)) {
+                    MessageBoxW(hDlg, L"次行颜色格式无效，请输入 #RRGGBB 或 R,G,B", L"无效输入", MB_OK | MB_ICONWARNING);
+                    return 0;
+                }
+                wchar_t sizeBuf[16];
+                GetWindowTextW(GetDlgItem(hDlg, 502), sizeBuf, 16);
+                int fontSize = _wtoi(sizeBuf);
+                if (fontSize < 12 || fontSize > 72) {
+                    MessageBoxW(hDlg, L"首行字号需在 12 ~ 72 之间", L"无效输入", MB_OK | MB_ICONWARNING);
+                    return 0;
+                }
+                wchar_t sizeBuf2[16];
+                GetWindowTextW(GetDlgItem(hDlg, 504), sizeBuf2, 16);
+                int secondFontSize = _wtoi(sizeBuf2);
+                if (secondFontSize < 12 || secondFontSize > 72) {
+                    MessageBoxW(hDlg, L"次行字号需在 12 ~ 72 之间", L"无效输入", MB_OK | MB_ICONWARNING);
+                    return 0;
+                }
+                ctx->color = color;
+                ctx->nextColor = nextColor;
+                ctx->fontSize = fontSize;
+                ctx->secondFontSize = secondFontSize;
+                ctx->ok = true;
+            }
             DestroyWindow(hDlg);
             return 0;
         }

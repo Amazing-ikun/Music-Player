@@ -40,6 +40,10 @@ set(SOURCES
     PlaylistManager.cpp
     ListeningHistory.h
     ListeningHistory.cpp
+    LyricParser.h
+    LyricParser.cpp
+    LyricWindow.h
+    LyricWindow.cpp
     app.rc
 )
 
@@ -63,6 +67,7 @@ target_link_libraries(MusicPlayer
     shell32.lib
     user32.lib
     gdi32.lib
+    gdiplus.lib
     oleaut32.lib
 )
 

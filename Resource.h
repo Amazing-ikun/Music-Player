@@ -15,6 +15,7 @@ constexpr int IDC_STAT_VOL         = 1010;
 constexpr int IDC_CTRL_PANEL       = 1012;
 constexpr int IDC_BTN_LOCATE       = 1013;
 constexpr int IDC_BTN_MUTE         = 1014;
+constexpr int IDC_BTN_LYRICS       = 1015;
 
 // Menu Command IDs
 constexpr int ID_FILE_OPENFOLDER   = 2001;
@@ -49,6 +50,9 @@ constexpr int ID_UNDO_REMOVE       = 2029;
 constexpr int ID_SETTINGS_ABOUT    = 2030;
 constexpr int ID_SETTINGS_BALANCE  = 2031;
 constexpr int ID_SETTINGS_RESCAN_DURATIONS = 2032;
+constexpr int ID_SETTINGS_LYRICS          = 2033;
+constexpr int ID_FILE_MATCH_LYRICS        = 2034;
+constexpr int ID_SETTINGS_LYRICS_OPTIONS  = 2035;
 
 // Custom Window Messages
 constexpr UINT WM_USER_SONG_END    = WM_USER + 100;

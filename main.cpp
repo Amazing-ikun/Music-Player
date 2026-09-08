@@ -5,10 +5,13 @@
 #include <commctrl.h>
 
 // MusicPlayer version
-static const wchar_t* APP_VERSION = L"2.0.0";
+static const wchar_t* APP_VERSION = L"2.0.1";
 
 // Changelog — shown in the About dialog
 static const wchar_t* CHANGELOG =
+    L"v2.0.1\r\n"
+    L"  - 重构: 代码架构优化(高内聚低耦合), 从主窗口拆出 Settings(设置持久化)/TrayIcon(托盘图标)/Dialogs(全部对话框)/Hotkey(热键类型) 四个模块, 消除对话框对主窗口的反向依赖, main.cpp 由 4490 行精简至约 2900 行\r\n"
+    L"\r\n"
     L"v2.0.0\r\n"
     L"  - 新增: 桌面歌词悬浮窗 (置顶、无边框、GDI+ 逐像素半透明渲染, 鼠标移开 5 秒后背景透明仅显示歌词)\r\n"
     L"  - 新增: 本地 .lrc 歌词解析 (自动识别 UTF-8/UTF-16/GBK 编码, 支持多时间戳与 offset 偏移)\r\n"
@@ -106,6 +109,10 @@ static const wchar_t* CHANGELOG =
 #include "PlaylistManager.h"
 #include "ListeningHistory.h"
 #include "LyricWindow.h"
+#include "Settings.h"
+#include "TrayIcon.h"
+#include "Dialogs.h"
+#include "Hotkey.h"
 #include <chrono>
 
 namespace {
@@ -115,12 +122,6 @@ namespace {
     constexpr int MIN_H = 400;
     constexpr int SEEK_RES = 10000;
     constexpr int LV_ROW_HEIGHT = 36;
-
-    // 关于对话框尺寸: 默认/最小 = 420x380, 最大拉伸上限 = 800x640
-    constexpr int ABOUT_MIN_W = 420;
-    constexpr int ABOUT_MIN_H = 380;
-    constexpr int ABOUT_MAX_W = 800;
-    constexpr int ABOUT_MAX_H = 640;
 }
 
 static std::wstring FormatTime(double seconds) {
@@ -190,48 +191,6 @@ static bool NamesDifferTooMuch(const std::wstring& song, const std::wstring& lrc
     return (a.find(b) == std::wstring::npos && b.find(a) == std::wstring::npos);
 }
 
-// 解析颜色: 支持十六进制 (#RRGGBB / RRGGBB) 与 RGB (R,G,B 或 R G B); 失败返回 false
-static bool ParseColor(const std::wstring& input, COLORREF& out) {
-    std::wstring s = input;
-    size_t b = 0, e = s.size();
-    while (b < e && iswspace(s[b])) b++;
-    while (e > b && iswspace(s[e - 1])) e--;
-    s = s.substr(b, e - b);
-    if (s.empty()) return false;
-    if (s[0] == L'#') s = s.substr(1);
-    if (s.empty()) return false;
-
-    // RGB: r,g,b 或 r g b
-    int r = 0, g = 0, bl = 0;
-    if (swscanf(s.c_str(), L"%d,%d,%d", &r, &g, &bl) == 3 ||
-        swscanf(s.c_str(), L"%d %d %d", &r, &g, &bl) == 3) {
-        if (r < 0 || r > 255 || g < 0 || g > 255 || bl < 0 || bl > 255) return false;
-        out = RGB(r, g, bl);
-        return true;
-    }
-    // 十六进制: 6 位 RRGGBB
-    if (s.size() == 6) {
-        unsigned v = 0;
-        bool ok = true;
-        for (wchar_t c : s) {
-            if (!((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') || (c >= L'A' && c <= L'F'))) { ok = false; break; }
-            v = v * 16 + (c >= L'0' && c <= L'9' ? c - L'0' : (towlower(c) - L'a' + 10));
-        }
-        if (ok) {
-            out = RGB((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
-            return true;
-        }
-    }
-    return false;
-}
-
-// COLORREF → "#RRGGBB" 十六进制字符串
-static std::wstring ColorToHex(COLORREF c) {
-    wchar_t buf[16];
-    swprintf(buf, 16, L"#%02X%02X%02X", GetRValue(c), GetGValue(c), GetBValue(c));
-    return buf;
-}
-
 static std::wstring GetExeDirectory() {
     wchar_t path[MAX_PATH];
     GetModuleFileNameW(NULL, path, MAX_PATH);
@@ -286,81 +245,6 @@ static const wchar_t* COL_LABELS[4] = { L"#", L"标题", L"专辑", L"时长" };
 static const int COL_WIDTHS[4] = { 40, 280, 180, 80 };
 
 // Hotkey key names by array position (0-6)
-static const char* HK_KEY_NAMES[7] = {
-    "playpause", "prev", "next", "volup", "voldn", "restore", "minimize"
-};
-
-// HotkeyBinding - 单个快捷键配置
-struct HotkeyBinding {
-    int    id;
-    const wchar_t* actionName;
-    int    vk;
-    int    mod;       // MOD_CONTROL, MOD_ALT, or combination
-};
-
-// Key name lookup tables
-static const struct { int vk; const wchar_t* name; } VK_NAMES[] = {
-    { VK_LEFT,  L"Left"  }, { VK_RIGHT, L"Right" },
-    { VK_UP,    L"Up"    }, { VK_DOWN,  L"Down"  },
-    { VK_SPACE, L"Space" }, { VK_RETURN,L"Enter" },
-    { VK_TAB,   L"Tab"   }, { VK_DELETE,L"Del"   },
-    { VK_ESCAPE,L"Esc"   }, { VK_BACK,  L"Back"  },
-    { VK_HOME,  L"Home"  }, { VK_END,   L"End"   },
-    { VK_PRIOR, L"PgUp"  }, { VK_NEXT,  L"PgDn"  },
-    { VK_OEM_PLUS, L"+"  }, { VK_OEM_MINUS, L"-" },
-    { 0, NULL }
-};
-
-static std::wstring VkToName(int vk) {
-    for (auto& e : VK_NAMES) { if (e.vk == vk) return e.name; }
-    if (vk >= '0' && vk <= '9') return std::wstring(1, (wchar_t)vk);
-    if (vk >= 'A' && vk <= 'Z') return std::wstring(1, (wchar_t)vk);
-    wchar_t buf[16]; swprintf(buf, 16, L"VK_%d", vk); return buf;
-}
-
-static int NameToVk(const std::wstring& name) {
-    for (auto& e : VK_NAMES) { if (name == e.name) return e.vk; }
-    if (name.size() == 1) {
-        wchar_t c = name[0];
-        if (c >= '0' && c <= '9') return (int)c;
-        if (c >= 'A' && c <= 'Z') return (int)c;
-        if (c >= 'a' && c <= 'z') return (int)(c - 32);
-    }
-    return 0;
-}
-
-static std::wstring HotkeyToString(int vk, int mod) {
-    std::wstring s;
-    if (mod & MOD_CONTROL) s += L"Ctrl+";
-    if (mod & MOD_ALT)    s += L"Alt+";
-    s += VkToName(vk);
-    return s;
-}
-
-// Encode binding as short key: "CA+Left", "C+P", "A+Space"
-static std::wstring BindingToCode(int vk, int mod) {
-    std::wstring s;
-    if (mod & MOD_CONTROL) s += L"C";
-    if (mod & MOD_ALT)    s += L"A";
-    if (!s.empty()) s += L"+";
-    s += VkToName(vk);
-    return s;
-}
-
-static bool CodeToBinding(const std::wstring& code, int& vk, int& mod) {
-    vk = 0; mod = 0;
-    size_t pos = code.find(L'+');
-    if (pos == std::wstring::npos) return false;
-    std::wstring modPart = code.substr(0, pos);
-    std::wstring keyPart = code.substr(pos + 1);
-    for (auto c : modPart) {
-        if (c == L'C' || c == L'c') mod |= MOD_CONTROL;
-        if (c == L'A' || c == L'a') mod |= MOD_ALT;
-    }
-    vk = NameToVk(keyPart);
-    return vk != 0;
-}
-
 // Pure search logic: check if song text fields match a query
 static bool SearchMatchesText(const std::wstring& query,
                                const std::wstring& title,
@@ -381,98 +265,12 @@ static bool SearchMatchesText(const std::wstring& query,
     return contains(title) || contains(artist) || contains(album);
 }
 
-// Forward declaration
-class MainWindow;
-
-// DlgCtx - Hotkey dialog context (needed by both MainWindow and HotkeyDlgProc)
-struct HKDlgCtx { HotkeyBinding* bindings; int recording; int count; MainWindow* win; int result; };
-
-static LRESULT CALLBACK HotkeyDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
-static LRESULT CALLBACK LyricsSettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
-
-struct StatsDlgCtx;
-struct StatsDlgCtx {
-    MainWindow* win;
-    int rangeDays;
-    bool useCalendarRange;
-    bool useAllRange;
-    SYSTEMTIME calStart, calEnd;
-
-    int baseW, baseH;
-    int yDayList, yWeekList, yPlayList, yTotal, yButtons;
-    int hDay, hWeek, hPlay;
-
-    HWND hRadio7, hRadio30, hRadioAll, hRadioCustom;
-    HWND hDtpStart, hDtpEnd;
-    HWND hDayList, hWeekList, hPlayCountList, hTotalText;
-    HWND hLabelDay, hLabelWeek, hLabelPlay;
-    HWND hDlg;
-    bool dtpGuard; // guard against re-entrancy from DTM_SETSYSTEMTIME
-};
-// 统计数据导出对话框上下文
-struct ExportCtx {
-    HWND hDlg;
-    HWND hRadioCsv, hRadioJson;
-    HWND hChkDaily, hChkWeekly, hChkTop, hChkTotal;
-    bool asCsv;
-    bool includeDaily, includeWeekly, includeTopSongs, includeTotal;
-    int result;
-};
-static LRESULT CALLBACK ExportStatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
-
 // 时长缓存条目: 记录文件大小与修改时间用于缓存失效判断
 struct DurationCacheEntry {
     double    duration;   // 秒
     ULONGLONG size;
     FILETIME  mtime;
 };
-
-static LRESULT CALLBACK StatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
-static LRESULT CALLBACK SpeedInputDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
-static LRESULT CALLBACK AboutDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp);
-static void LayoutStatsControls(StatsDlgCtx* c, int clientW, int clientH);
-static void ComputeStatsRange(const StatsDlgCtx* ctx, std::string& from, std::string& to);
-
-// 关于对话框子控件与上下文
-struct AboutCtx {
-    HWND hDlg;
-    HFONT hGuiFont;     // 正文/编辑框字体
-    HFONT hTitleFont;   // 标题字体
-    HWND hTitle;
-    HWND hVersion;
-    HWND hChangelogLabel;
-    HWND hChangelog;
-    HWND hClose;
-    int lineH;          // 编辑框行高, 用于格式矩形对齐
-};
-
-// 根据当前客户区大小布局关于对话框子控件 (创建时与 WM_SIZE 时调用)
-static void LayoutAboutControls(AboutCtx* ctx) {
-    if (!ctx->hChangelog) return;
-    RECT cr;
-    GetClientRect(ctx->hDlg, &cr);
-    int clientW = cr.right, clientH = cr.bottom;
-
-    const int marginX = 20, gap = 12;
-    const int btnW = 80, btnH = 28;
-    int btnY = clientH - btnH - gap;
-    int editY = 95;
-    int editH = btnY - gap - editY;
-
-    MoveWindow(ctx->hTitle, marginX, 15, clientW - marginX * 2, 28, TRUE);
-    MoveWindow(ctx->hVersion, marginX, 48, clientW - marginX * 2, 20, TRUE);
-    MoveWindow(ctx->hChangelogLabel, marginX, 75, 100, 16, TRUE);
-    MoveWindow(ctx->hChangelog, marginX, editY, clientW - marginX * 2, editH, TRUE);
-    MoveWindow(ctx->hClose, clientW / 2 - btnW / 2, btnY, btnW, btnH, TRUE);
-
-    // 将编辑框内部格式矩形对齐到 lineH 整数倍, 避免底部出现被裁剪的半行
-    RECT fmt;
-    SendMessageW(ctx->hChangelog, EM_GETRECT, 0, (LPARAM)&fmt);
-    int fmtH = fmt.bottom - fmt.top;
-    fmt.bottom = fmt.top + (fmtH / ctx->lineH) * ctx->lineH;
-    SendMessageW(ctx->hChangelog, EM_SETRECT, 0, (LPARAM)&fmt);
-    InvalidateRect(ctx->hChangelog, NULL, TRUE);
-}
 
 // MainWindow
 class MainWindow {
@@ -489,17 +287,8 @@ public:
         , m_currentIndex(-1), m_userDraggingSeek(false)
         , m_sortColumn(-1), m_sortAscending(true)
         , m_shufflePos(0)
-        , m_settingsAutoplay(1), m_settingsRememberProgress(true)
-        , m_settingsTray(true), m_trayIconAdded(false), m_taskbarCreatedMsg(0)
+        , m_taskbarCreatedMsg(0)
         , m_trayReaddAttempts(0), m_trayReaddActive(false)
-        , m_balanceEnabled(true)
-        , m_settingsLyricsShow(false)
-        , m_settingsLyricsLocked(false)
-        , m_settingsLyricsTranslation(false)
-        , m_lyricsColor(RGB(255, 255, 255))
-        , m_lyricsNextColor(RGB(150, 150, 150))
-        , m_lyricsFontSize(30)
-        , m_lyricsSecondFontSize(20)
         , m_ctrlPanel(NULL)
         , m_listening(false), m_listenStartWall(0), m_saveTick(0), m_nextScheduled(-1)
         , m_undoValid(false)
@@ -550,9 +339,6 @@ public:
         return true;
     }
 
-    // 最早有听歌记录的那天 (YYYY-MM-DD); 无记录返回空串. 供"统计范围=所有"使用
-    std::string GetHistoryEarliestDate() const { return m_history.GetEarliestDate(); }
-
 private:
     // ---- Controls ----
     HWND m_hwnd;
@@ -580,26 +366,16 @@ private:
     std::vector<int> m_shuffleOrder;
     int              m_shufflePos;
 
-    // ---- Settings ----
-    int m_settingsAutoplay;  // 0=不进行操作, 1=自动播放
-    bool m_settingsRememberProgress;
-    bool m_settingsTray;
-    bool m_trayIconAdded;
+    // ---- Settings / Tray ----
+    Settings m_settings;
+    TrayIcon m_trayIcon;
     UINT m_taskbarCreatedMsg; // "TaskbarCreated" 注册消息, 用于探测资源管理器重启
     UINT m_trayReaddAttempts; // 资源管理器重启后延迟重加托盘图标的尝试次数
     bool m_trayReaddActive;   // 重试定时器当前是否在运行
-    bool m_balanceEnabled;   // 音量平衡
 
     // ---- Desktop lyrics ----
     LyricParser m_lyrics;
     LyricWindow m_lyricWindow;
-    bool m_settingsLyricsShow;
-    bool m_settingsLyricsLocked;       // 锁定(仅歌词、不可拖拽缩放)
-    bool m_settingsLyricsTranslation;  // 是否显示译文
-    COLORREF m_lyricsColor;    // 首行颜色
-    COLORREF m_lyricsNextColor;// 次行颜色
-    int m_lyricsFontSize;      // 首行字号(像素)
-    int m_lyricsSecondFontSize;// 次行字号(像素)
     std::map<std::wstring, std::wstring> m_lyricsMap;  // 歌曲路径 → lrc 路径
 
     // ---- Hotkeys ----
@@ -635,8 +411,6 @@ private:
     bool m_undoValid;
 
     HFONT m_hFont;
-
-    friend LRESULT CALLBACK StatsDlgProc(HWND, UINT, WPARAM, LPARAM);
 
     static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         MainWindow* win = (MainWindow*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
@@ -699,7 +473,7 @@ private:
                 // 「词」按钮灰度差异化: 关闭时灰字, 开启时黑字
                 if ((HWND)lp == m_btnLyrics) {
                     HDC hdc = (HDC)wp;
-                    SetTextColor(hdc, m_settingsLyricsShow ? RGB(0, 0, 0) : RGB(150, 150, 150));
+                    SetTextColor(hdc, m_settings.lyricsShow ? RGB(0, 0, 0) : RGB(150, 150, 150));
                     SetBkMode(hdc, TRANSPARENT);
                     return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
                 }
@@ -716,7 +490,6 @@ private:
                 if (msg == m_taskbarCreatedMsg && m_taskbarCreatedMsg != 0) {
                     // 资源管理器重启后托盘图标被系统清除。此时通知区往往尚未就绪,
                     // 立即 NIM_ADD 容易失败或图标随后被再次清除, 故改为延迟重试。
-                    m_trayIconAdded = false;
                     // 同一时间点的多次 TaskbarCreated 广播只启动一次重试定时器,
                     // 避免反复重置定时器导致重加被无限推迟。
                     if (!m_trayReaddActive) {
@@ -743,12 +516,11 @@ private:
     }
 
     void OnCreate() {
+        m_trayIcon.SetTarget(m_hInst, m_hwnd);
         INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_WIN95_CLASSES | ICC_DATE_CLASSES };
         InitCommonControlsEx(&icc);
         CreateMenuBar();
         CreateControls();
-
-        RegisterStatsWindowClass();
 
         if (!m_audio.Initialize(m_hwnd)) {
             WriteLog(L"初始化音频引擎失败: %ls", m_audio.GetErrorMessage().c_str());
@@ -762,8 +534,6 @@ private:
 
         LoadPlayCount();
         LoadSettings();
-        // 同步音量平衡开关: 老版本 .settings.txt 无此字段时, 以 MainWindow 默认值 (开启) 为准
-        m_audio.SetBalanceEnabled(m_balanceEnabled);
         UpdateSettingsMenu();
         UpdateModeUI();
         UpdateSpeedMenu();
@@ -780,8 +550,8 @@ private:
         m_audio.SetFadeNotify(m_hwnd, WM_APP_FADE_DONE);
         LoadLyricsMap();
 
-        bool startPlay = (m_settingsAutoplay == 1);
-        if (m_settingsRememberProgress && !m_playlist.IsEmpty()) {
+        bool startPlay = (m_settings.autoplay == 1);
+        if (m_settings.rememberProgress && !m_playlist.IsEmpty()) {
             if (LoadLastSong()) {
                 LoadLyricsForCurrentSong();
                 if (m_audio.IsBalanceEnabled()) {
@@ -831,39 +601,39 @@ private:
         // 桌面歌词: 设置右键隐藏回调, 同步按钮状态, 并按上次状态恢复显示
         m_lyricWindow.SetHideCallback([this]() { SetLyricsVisible(false); });
         m_lyricWindow.SetFontSizeChangedCallback([this](int fs) {
-            m_lyricsFontSize = fs;
+            m_settings.lyricsFontSize = fs;
             SaveSettings();
         });
         m_lyricWindow.SetSecondFontSizeChangedCallback([this](int fs) {
-            m_lyricsSecondFontSize = fs;
+            m_settings.lyricsSecondFontSize = fs;
             SaveSettings();
         });
         m_lyricWindow.SetPrevNextCallback([this](bool next) {
             if (next) OnNext(); else OnPrev();
         });
         m_lyricWindow.SetLockedChangedCallback([this](bool locked) {
-            m_settingsLyricsLocked = locked;
+            m_settings.lyricsLocked = locked;
             SaveSettings();
         });
         m_lyricWindow.SetTranslationChangedCallback([this](bool show) {
-            m_settingsLyricsTranslation = show;
+            m_settings.lyricsTranslation = show;
             SaveSettings();
         });
-        m_lyricWindow.SetLocked(m_settingsLyricsLocked);
-        m_lyricWindow.SetShowTranslation(m_settingsLyricsTranslation);
-        m_lyricWindow.SetColor(m_lyricsColor);
-        m_lyricWindow.SetNextColor(m_lyricsNextColor);
-        m_lyricWindow.SetFontSize(m_lyricsFontSize);
-        m_lyricWindow.SetSecondFontSize(m_lyricsSecondFontSize);
+        m_lyricWindow.SetLocked(m_settings.lyricsLocked);
+        m_lyricWindow.SetShowTranslation(m_settings.lyricsTranslation);
+        m_lyricWindow.SetColor(m_settings.lyricsColor);
+        m_lyricWindow.SetNextColor(m_settings.lyricsNextColor);
+        m_lyricWindow.SetFontSize(m_settings.lyricsFontSize);
+        m_lyricWindow.SetSecondFontSize(m_settings.lyricsSecondFontSize);
         UpdateLyricButton();
-        if (m_settingsLyricsShow) {
+        if (m_settings.lyricsShow) {
             ShowLyricWindow();
         }
         UpdateUI();
     }
 
     void OnCloseRequest() {
-        if (m_settingsTray) {
+        if (m_settings.trayMinimize) {
             MinimizeToTray();
         } else {
             OnRealClose();
@@ -873,7 +643,7 @@ private:
     void OnRealClose() {
         StopListening();
         m_history.Save(GetExeDirectory() + L"\\.history.txt");
-        if (m_settingsRememberProgress) SaveLastSong();
+        if (m_settings.rememberProgress) SaveLastSong();
         SavePlayCount();
         SavePlaylist();
         SaveVolume();
@@ -1153,31 +923,31 @@ private:
                 case ID_UNDO_REMOVE:          UndoRemove();     break;
                 case ID_FILE_EXIT:            OnRealClose(); break;
                 case ID_STARTUP_NOTHING:
-                    m_settingsAutoplay = 0;
+                    m_settings.autoplay = 0;
                     UpdateSettingsMenu();
                     SaveSettings();
                     break;
                 case ID_STARTUP_AUTOPLAY:
-                    m_settingsAutoplay = 1;
+                    m_settings.autoplay = 1;
                     UpdateSettingsMenu();
                     SaveSettings();
                     break;
                 case ID_SETTINGS_REMEMBER:
-                    m_settingsRememberProgress = !m_settingsRememberProgress;
+                    m_settings.rememberProgress = !m_settings.rememberProgress;
                     UpdateSettingsMenu();
                     break;
                 case ID_SETTINGS_TRAY:
-                    m_settingsTray = !m_settingsTray;
+                    m_settings.trayMinimize = !m_settings.trayMinimize;
                     UpdateSettingsMenu();
                     break;
                 case ID_SETTINGS_BALANCE:
-                    m_balanceEnabled = !m_balanceEnabled;
-                    m_audio.SetBalanceEnabled(m_balanceEnabled);
+                    m_settings.balanceEnabled = !m_settings.balanceEnabled;
+                    m_audio.SetBalanceEnabled(m_settings.balanceEnabled);
                     UpdateSettingsMenu();
                     SaveSettings();
                     break;
                 case ID_SETTINGS_LYRICS:
-                    SetLyricsVisible(!m_settingsLyricsShow);
+                    SetLyricsVisible(!m_settings.lyricsShow);
                     break;
                 case ID_SETTINGS_LYRICS_OPTIONS:
                     ShowLyricsSettingsDialog();
@@ -1262,7 +1032,7 @@ private:
                 }
                 if (code == TB_ENDTRACK) {
                     m_userDraggingSeek = false;
-                    if (m_settingsRememberProgress) SaveLastSong();
+                    if (m_settings.rememberProgress) SaveLastSong();
                 }
             }
         } else if (hCtrl == m_sliderVol) {
@@ -1486,7 +1256,7 @@ private:
             }
             if (++m_saveTick >= 20) {
                 m_saveTick = 0;
-                if (m_settingsRememberProgress)
+                if (m_settings.rememberProgress)
                     SaveLastSong();
                 // Periodically flush session time to disk so forced shutdown
                 // loses at most one interval (~10 s) of listening history
@@ -1907,79 +1677,25 @@ private:
 
     void UpdateSettingsMenu() {
         CheckMenuItem(m_startupSubMenu, ID_STARTUP_NOTHING,
-            MF_BYCOMMAND | (m_settingsAutoplay == 0 ? MF_CHECKED : MF_UNCHECKED));
+            MF_BYCOMMAND | (m_settings.autoplay == 0 ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(m_startupSubMenu, ID_STARTUP_AUTOPLAY,
-            MF_BYCOMMAND | (m_settingsAutoplay == 1 ? MF_CHECKED : MF_UNCHECKED));
+            MF_BYCOMMAND | (m_settings.autoplay == 1 ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(m_settingsMenu, ID_SETTINGS_REMEMBER,
-            MF_BYCOMMAND | (m_settingsRememberProgress ? MF_CHECKED : MF_UNCHECKED));
+            MF_BYCOMMAND | (m_settings.rememberProgress ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(m_settingsMenu, ID_SETTINGS_TRAY,
-            MF_BYCOMMAND | (m_settingsTray ? MF_CHECKED : MF_UNCHECKED));
+            MF_BYCOMMAND | (m_settings.trayMinimize ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(m_settingsMenu, ID_SETTINGS_BALANCE,
-            MF_BYCOMMAND | (m_balanceEnabled ? MF_CHECKED : MF_UNCHECKED));
+            MF_BYCOMMAND | (m_settings.balanceEnabled ? MF_CHECKED : MF_UNCHECKED));
         CheckMenuItem(m_settingsMenu, ID_SETTINGS_LYRICS,
-            MF_BYCOMMAND | (m_settingsLyricsShow ? MF_CHECKED : MF_UNCHECKED));
+            MF_BYCOMMAND | (m_settings.lyricsShow ? MF_CHECKED : MF_UNCHECKED));
     }
 
 
     // Speed input dialog
 
     void ShowSpeedInputDialog() {
-        const wchar_t DLG_CLASS[] = L"SpeedInputDlg";
-        WNDCLASSEXW wc = {};
-        wc.cbSize        = sizeof(wc);
-        wc.style         = CS_HREDRAW | CS_VREDRAW;
-        wc.lpfnWndProc   = SpeedInputDlgProc;
-        wc.hInstance     = m_hInst;
-        wc.hIcon         = LoadIcon(NULL, IDI_APPLICATION);
-        wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-        wc.lpszClassName = DLG_CLASS;
-        if (!RegisterClassExW(&wc)) return;
-
-        int dlgW = 280, dlgH = 140;
-        int sw = GetSystemMetrics(SM_CXSCREEN);
-        int sh = GetSystemMetrics(SM_CYSCREEN);
-        int x = (sw - dlgW) / 2, y = (sh - dlgH) / 2;
-
-        HWND hDlg = CreateWindowExW(0, DLG_CLASS, L"自定义倍速",
-            WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-            x, y, dlgW, dlgH, m_hwnd, NULL, m_hInst, NULL);
-        if (!hDlg) return;
-
-        struct SpeedCtx { MainWindow* win; double result; };
-        SpeedCtx* ctx = new SpeedCtx{ this, -1.0 };
-        SetWindowLongPtrW(hDlg, GWLP_USERDATA, (LONG_PTR)ctx);
-
-        CreateWindowExW(0, L"STATIC", L"输入倍速 (0.1 ~ 10.0):",
-            WS_CHILD | WS_VISIBLE, 15, 15, 250, 20, hDlg, NULL, m_hInst, NULL);
-        wchar_t cur[16];
-        swprintf(cur, 16, L"%.2g", m_audio.GetSpeed());
-        CreateWindowExW(0, L"EDIT", cur,
-            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_CENTER,
-            15, 40, 250, 26, hDlg, (HMENU)500, m_hInst, NULL);
-        SendMessageW(GetDlgItem(hDlg, 500), EM_SETLIMITTEXT, 6, 0);
-
-        CreateWindowExW(0, L"BUTTON", L"确定",
-            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            dlgW / 2 - 95, 80, 80, 28, hDlg, (HMENU)IDOK, m_hInst, NULL);
-        CreateWindowExW(0, L"BUTTON", L"取消",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            dlgW / 2 + 15, 80, 80, 28, hDlg, (HMENU)IDCANCEL, m_hInst, NULL);
-
-        EnableWindow(m_hwnd, FALSE);
-        MSG msg;
-        while (IsWindow(hDlg) && GetMessageW(&msg, NULL, 0, 0)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-        EnableWindow(m_hwnd, TRUE);
-        SetForegroundWindow(m_hwnd);
-
-        if (ctx->result > 0) {
-            ApplySpeed(ctx->result);
-        }
-        delete ctx;
-        UnregisterClassW(DLG_CLASS, m_hInst);
+        double v = ::ShowSpeedInputDialog(m_hInst, m_hwnd, m_audio.GetSpeed());
+        if (v > 0) ApplySpeed(v);
     }
 
 
@@ -2095,628 +1811,26 @@ private:
     void ShowHotkeyDialog() {
         HotkeyBinding tmp[7];
         memcpy(tmp, m_hotkeys, sizeof(m_hotkeys));
-
-        const wchar_t DLG_CLASS[] = L"HotkeyConfigDlg";
-        WNDCLASSEXW wc = {};
-        wc.cbSize        = sizeof(wc);
-        wc.style         = CS_HREDRAW | CS_VREDRAW;
-        wc.lpfnWndProc   = HotkeyDlgProc;
-        wc.hInstance     = m_hInst;
-        wc.hIcon         = LoadIcon(NULL, IDI_APPLICATION);
-        wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-        wc.lpszClassName = DLG_CLASS;
-        if (!RegisterClassExW(&wc)) return;
-
-        int dlgW = 460, dlgH = 350;
-        int sw = GetSystemMetrics(SM_CXSCREEN);
-        int sh = GetSystemMetrics(SM_CYSCREEN);
-        int x = (sw - dlgW) / 2, y = (sh - dlgH) / 2;
-
-        HWND hDlg = CreateWindowExW(0, DLG_CLASS, L"配置快捷键",
-            WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-            x, y, dlgW, dlgH, m_hwnd, NULL, m_hInst, NULL);
-        if (!hDlg) return;
-
-        // Store context in dialog's GWLP_USERDATA
-        HKDlgCtx* ctx = new HKDlgCtx{ tmp, -1, m_hotkeyCount, this, 0 };
-        SetWindowLongPtrW(hDlg, GWLP_USERDATA, (LONG_PTR)ctx);
-
-        HFONT hGuiFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, NULL);
-
-        int rowY = 20;
-        for (int i = 0; i < m_hotkeyCount; i++) {
-            wchar_t label[64];
-            swprintf(label, 64, L"%ls:", m_hotkeys[i].actionName);
-            CreateWindowExW(0, L"STATIC", label,
-                WS_CHILD | WS_VISIBLE, 20, rowY, 140, 24, hDlg, NULL, m_hInst, NULL);
-
-            std::wstring keyText = HotkeyToString(tmp[i].vk, tmp[i].mod);
-            HWND hKey = CreateWindowExW(0, L"STATIC", keyText.c_str(),
-                WS_CHILD | WS_VISIBLE | SS_CENTER | SS_SUNKEN,
-                170, rowY, 200, 24, hDlg, (HMENU)(size_t)(100 + i), m_hInst, NULL);
-            SendMessageW(hKey, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
-
-            CreateWindowExW(0, L"BUTTON", L"更改",
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                380, rowY, 60, 24, hDlg, (HMENU)(size_t)(200 + i), m_hInst, NULL);
-            rowY += 32;
-        }
-
-        CreateWindowExW(0, L"STATIC", L"提示: 点击\"更改\"后按下新的按键组合",
-            WS_CHILD | WS_VISIBLE | SS_CENTER,
-            20, rowY + 10, dlgW - 40, 20, hDlg, NULL, m_hInst, NULL);
-
-        CreateWindowExW(0, L"BUTTON", L"确定",
-            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            dlgW / 2 - 110, rowY + 40, 90, 28, hDlg, (HMENU)(size_t)IDOK, m_hInst, NULL);
-        CreateWindowExW(0, L"BUTTON", L"取消",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            dlgW / 2 + 20, rowY + 40, 90, 28, hDlg, (HMENU)(size_t)IDCANCEL, m_hInst, NULL);
-
-        EnableWindow(m_hwnd, FALSE);
-        MSG msg;
-        while (IsWindow(hDlg) && GetMessageW(&msg, NULL, 0, 0)) {
-            // WM_KEYDOWN from the thread queue — capture for recording
-            if (msg.message == WM_KEYDOWN) {
-                HKDlgCtx* c = (HKDlgCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
-                if (c && c->recording >= 0 && c->recording < c->count) {
-                    int mod = 0;
-                    if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mod |= MOD_CONTROL;
-                    if (GetAsyncKeyState(VK_MENU) & 0x8000)    mod |= MOD_ALT;
-                    int vk = (int)msg.wParam;
-                    if (vk == VK_CONTROL || vk == VK_MENU || vk == VK_SHIFT ||
-                        vk == VK_ESCAPE || vk == VK_RETURN) continue;
-                    if (mod == 0) mod = MOD_CONTROL;
-                    int idx = c->recording;
-                    c->bindings[idx].vk = vk;
-                    c->bindings[idx].mod = mod;
-                    std::wstring ks = HotkeyToString(vk, mod);
-                    SetWindowTextW(GetDlgItem(hDlg, 100 + idx), ks.c_str());
-                    c->recording = -1;
-                    ReleaseCapture();
-                    continue; // Don't dispatch to focused control
-                }
-            }
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-        EnableWindow(m_hwnd, TRUE);
-        SetForegroundWindow(m_hwnd);
-
-        if (ctx->result == 1) {
-            memcpy(m_hotkeys, ctx->bindings, sizeof(m_hotkeys));
+        if (::ShowHotkeyDialog(m_hInst, m_hwnd, tmp, m_hotkeyCount)) {
+            memcpy(m_hotkeys, tmp, sizeof(m_hotkeys));
             UnregisterHotKeys();
             RegisterHotKeys();
             SaveHotkeyBindings();
         }
-
-        delete ctx;
-        DeleteObject(hGuiFont);
-        UnregisterClassW(DLG_CLASS, m_hInst);
     }
 
 
-    // Stats window
-
-
-    static void FormatListenTime(double seconds, wchar_t* buf, int bufLen) {
-        int total = (int)seconds;
-        int h = total / 3600;
-        int m = (total % 3600) / 60;
-        int s = total % 60;
-        if (h > 0)
-            swprintf(buf, bufLen, L"%d小时%d分%d秒", h, m, s);
-        else if (m > 0)
-            swprintf(buf, bufLen, L"%d分%d秒", m, s);
-        else
-            swprintf(buf, bufLen, L"%d秒", s);
-    }
-
-    void RegisterStatsWindowClass() {
-        const wchar_t STATS_CLASS[] = L"StatsWindow";
-        WNDCLASSEXW wc = {};
-        wc.cbSize        = sizeof(wc);
-        wc.style         = CS_HREDRAW | CS_VREDRAW;
-        wc.lpfnWndProc   = StatsDlgProc;
-        wc.hInstance     = m_hInst;
-        wc.hIcon         = LoadIcon(NULL, IDI_APPLICATION);
-        wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-        wc.lpszClassName = STATS_CLASS;
-        RegisterClassExW(&wc);
+    void ShowAboutWindow() {
+        ::ShowAboutDialog(m_hInst, m_hwnd, APP_VERSION, CHANGELOG);
     }
 
     void ShowStatsWindow() {
-        const wchar_t STATS_CLASS[] = L"StatsWindow";
-        int dlgW = 660, dlgH = 620;
-        int sw = GetSystemMetrics(SM_CXSCREEN);
-        int sh = GetSystemMetrics(SM_CYSCREEN);
-        int x = (sw - dlgW) / 2, y = (sh - dlgH) / 2;
-
-        HWND hDlg = CreateWindowExW(0, STATS_CLASS, L"听歌时长统计",
-            WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_VISIBLE,
-            x, y, dlgW, dlgH, m_hwnd, NULL, m_hInst, NULL);
-        if (!hDlg) return;
-
-        StatsDlgCtx* ctx = new StatsDlgCtx();
-        ctx->win = this;
-        ctx->rangeDays = 30;
-        ctx->useCalendarRange = false;
-        ctx->useAllRange = false;
-        ctx->dtpGuard = false;
-        memset(&ctx->calStart, 0, sizeof(SYSTEMTIME));
-        memset(&ctx->calEnd, 0, sizeof(SYSTEMTIME));
-        ctx->hRadio7 = NULL;
-        ctx->hRadio30 = NULL;
-        ctx->hRadioAll = NULL;
-        ctx->hRadioCustom = NULL;
-        ctx->hDtpStart = NULL;
-        ctx->hDtpEnd = NULL;
-        ctx->hDayList = NULL;
-        ctx->hWeekList = NULL;
-        ctx->hTotalText = NULL;
-        ctx->hDlg = hDlg;
-        SetWindowLongPtrW(hDlg, GWLP_USERDATA, (LONG_PTR)ctx);
-
-        HFONT hGuiFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, NULL);
-        HFONT hBoldFont = CreateFontW(-13, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, NULL);
-
-        int yPos = 15;
-        int rY = yPos + 18;
-
-        // --- Group box: 统计范围 ---
-        CreateWindowExW(0, L"BUTTON", L"统计范围",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            10, yPos, dlgW - 20, 50, hDlg, NULL, m_hInst, NULL);
-
-        ctx->hRadioAll = CreateWindowExW(0, L"BUTTON", L"所有",
-            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
-            25, rY, 55, 22, hDlg, (HMENU)303, m_hInst, NULL);
-        SendMessageW(ctx->hRadioAll, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
-
-        ctx->hRadio7 = CreateWindowExW(0, L"BUTTON", L"7天",
-            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-            85, rY, 55, 22, hDlg, (HMENU)300, m_hInst, NULL);
-        SendMessageW(ctx->hRadio7, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
-
-        ctx->hRadio30 = CreateWindowExW(0, L"BUTTON", L"30天",
-            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-            145, rY, 60, 22, hDlg, (HMENU)301, m_hInst, NULL);
-        SendMessageW(ctx->hRadio30, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
-        SendMessageW(ctx->hRadio30, BM_SETCHECK, BST_CHECKED, 0);
-
-        ctx->hRadioCustom = CreateWindowExW(0, L"BUTTON", L"自定义",
-            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-            210, rY, 65, 22, hDlg, (HMENU)302, m_hInst, NULL);
-        SendMessageW(ctx->hRadioCustom, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
-
-        // --- DTP row + buttons ---
-        yPos += 62;
-        int dtpY = yPos;
-
-        CreateWindowExW(0, L"STATIC", L"起始:",
-            WS_CHILD | WS_VISIBLE, 15, dtpY + 3, 35, 20, hDlg, (HMENU)312, m_hInst, NULL);
-        ctx->hDtpStart = CreateWindowExW(0, DATETIMEPICK_CLASSW, NULL,
-            WS_CHILD | WS_VISIBLE | DTS_SHORTDATEFORMAT,
-            50, dtpY, 130, 26, hDlg, (HMENU)310, m_hInst, NULL);
-        SendMessageW(ctx->hDtpStart, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
-
-        CreateWindowExW(0, L"STATIC", L"终止:",
-            WS_CHILD | WS_VISIBLE, 200, dtpY + 3, 35, 20, hDlg, (HMENU)313, m_hInst, NULL);
-        ctx->hDtpEnd = CreateWindowExW(0, DATETIMEPICK_CLASSW, NULL,
-            WS_CHILD | WS_VISIBLE | DTS_SHORTDATEFORMAT,
-            235, dtpY, 130, 26, hDlg, (HMENU)311, m_hInst, NULL);
-        SendMessageW(ctx->hDtpEnd, WM_SETFONT, (WPARAM)hGuiFont, TRUE);
-
-        CreateWindowExW(0, L"BUTTON", L"刷新",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            dlgW - 100, dtpY - 2, 80, 28, hDlg, (HMENU)304, m_hInst, NULL);
-        SendMessageW(GetDlgItem(hDlg, 304), WM_SETFONT, (WPARAM)hGuiFont, TRUE);
-
-        SYSTEMTIME todayDtp;
-        GetLocalTime(&todayDtp);
-        SendMessageW(ctx->hDtpStart, DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&todayDtp);
-        SendMessageW(ctx->hDtpEnd, DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&todayDtp);
-        ctx->calStart = todayDtp;
-        ctx->calEnd = todayDtp;
-
-        yPos = dtpY + 34;
-
-        ctx->hLabelDay = CreateWindowExW(0, L"STATIC", L"每日详情",
-            WS_CHILD | WS_VISIBLE, 15, yPos, 100, 20, hDlg, NULL, m_hInst, NULL);
-
-        yPos += 20;
-        ctx->hDayList = CreateWindowExW(0, WC_LISTVIEWW, NULL,
-            WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_NOSORTHEADER,
-            15, yPos, dlgW - 30, 130, hDlg, NULL, m_hInst, NULL);
-        ListView_SetExtendedListViewStyle(ctx->hDayList, LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT);
-
-        LVCOLUMNW lc = {};
-        lc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
-        lc.fmt  = LVCFMT_LEFT;
-        lc.cx = 120; lc.pszText = (LPWSTR)L"日期"; ListView_InsertColumn(ctx->hDayList, 0, &lc);
-        lc.cx = 70;  lc.pszText = (LPWSTR)L"星期"; ListView_InsertColumn(ctx->hDayList, 1, &lc);
-        lc.cx = 150; lc.pszText = (LPWSTR)L"听歌时长"; ListView_InsertColumn(ctx->hDayList, 2, &lc);
-
-        yPos += 138;
-
-        ctx->hLabelWeek = CreateWindowExW(0, L"STATIC", L"每周统计",
-            WS_CHILD | WS_VISIBLE, 15, yPos, 100, 20, hDlg, NULL, m_hInst, NULL);
-
-        yPos += 20;
-        ctx->hWeekList = CreateWindowExW(0, WC_LISTVIEWW, NULL,
-            WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_NOSORTHEADER,
-            15, yPos, dlgW - 30, 70, hDlg, NULL, m_hInst, NULL);
-        ListView_SetExtendedListViewStyle(ctx->hWeekList, LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT);
-
-        lc.cx = 100; lc.pszText = (LPWSTR)L"周"; ListView_InsertColumn(ctx->hWeekList, 0, &lc);
-        lc.cx = 140; lc.pszText = (LPWSTR)L"日期范围"; ListView_InsertColumn(ctx->hWeekList, 1, &lc);
-        lc.cx = 150; lc.pszText = (LPWSTR)L"累计时长"; ListView_InsertColumn(ctx->hWeekList, 2, &lc);
-
-        yPos += 78;
-
-        ctx->hLabelPlay = CreateWindowExW(0, L"STATIC", L"我常听的",
-            WS_CHILD | WS_VISIBLE, 15, yPos, 180, 20, hDlg, NULL, m_hInst, NULL);
-
-        yPos += 20;
-        ctx->hPlayCountList = CreateWindowExW(0, WC_LISTVIEWW, NULL,
-            WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT | LVS_NOSORTHEADER,
-            15, yPos, dlgW - 30, 90, hDlg, NULL, m_hInst, NULL);
-        ListView_SetExtendedListViewStyle(ctx->hPlayCountList, LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT);
-
-        lc.cx = 40;  lc.pszText = (LPWSTR)L"#";   ListView_InsertColumn(ctx->hPlayCountList, 0, &lc);
-        lc.cx = 250; lc.pszText = (LPWSTR)L"歌曲"; ListView_InsertColumn(ctx->hPlayCountList, 1, &lc);
-        lc.cx = 80;  lc.pszText = (LPWSTR)L"次数"; ListView_InsertColumn(ctx->hPlayCountList, 2, &lc);
-
-        yPos += 98;
-
-        ctx->hTotalText = CreateWindowExW(0, L"STATIC", L"",
-            WS_CHILD | WS_VISIBLE | SS_CENTER,
-            15, yPos, dlgW - 30, 22, hDlg, (HMENU)400, m_hInst, NULL);
-        SendMessageW(ctx->hTotalText, WM_SETFONT, (WPARAM)hBoldFont, TRUE);
-
-        yPos += 28;
-        CreateWindowExW(0, L"BUTTON", L"导出数据...",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            dlgW / 2 - 120, yPos, 120, 28, hDlg, (HMENU)305, m_hInst, NULL);
-        CreateWindowExW(0, L"BUTTON", L"关闭",
-            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            dlgW / 2 + 20, yPos, 90, 28, hDlg, (HMENU)IDCANCEL, m_hInst, NULL);
-
-        RefreshStatsDisplay(ctx);
-
-        // Save base layout values for proportional resize
-        {
-            RECT cr;
-            GetClientRect(hDlg, &cr);
-            ctx->baseW = cr.right;
-            ctx->baseH = cr.bottom;
-            int yp = 15;
-            yp += 62;
-            yp += 34;
-            yp += 20;
-            ctx->yDayList = yp;
-            ctx->hDay = 130;
-            yp += 138;
-            yp += 20;
-            ctx->yWeekList = yp;
-            ctx->hWeek = 70;
-            yp += 78;
-            yp += 20;
-            ctx->yPlayList = yp;
-            ctx->hPlay = 90;
-            yp += 98;
-            ctx->yTotal = yp;
-            yp += 28;
-            ctx->yButtons = yp;
-        }
-
-        // Force initial layout pass: WM_SIZE during CreateWindowEx fired
-        // before baseH was set, so LayoutStatsControls skipped.
-        {
-            RECT cr;
-            GetClientRect(hDlg, &cr);
-            LayoutStatsControls(ctx, cr.right, cr.bottom);
-        }
-
-        DeleteObject(hBoldFont);
-        DeleteObject(hGuiFont);
+        StatsData data;
+        data.history = &m_history;
+        data.playCount = &m_playCount;
+        ::ShowStatsWindow(m_hInst, m_hwnd, data);
     }
 
-    // 统计导出：选择窗口 (格式 + 数据项) → 另存为 → 写入
-    void ShowExportStatsDialog(StatsDlgCtx* statsCtx) {
-        const wchar_t DLG_CLASS[] = L"ExportStatsDlg";
-        WNDCLASSEXW wc = {};
-        wc.cbSize        = sizeof(wc);
-        wc.style         = CS_HREDRAW | CS_VREDRAW;
-        wc.lpfnWndProc   = ExportStatsDlgProc;
-        wc.hInstance     = m_hInst;
-        wc.hIcon         = LoadIcon(NULL, IDI_APPLICATION);
-        wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-        wc.lpszClassName = DLG_CLASS;
-        if (!RegisterClassExW(&wc)) return;
-
-        int dlgW = 380, dlgH = 300;
-        int sw = GetSystemMetrics(SM_CXSCREEN);
-        int sh = GetSystemMetrics(SM_CYSCREEN);
-        int x = (sw - dlgW) / 2, y = (sh - dlgH) / 2;
-
-        HWND hDlg = CreateWindowExW(0, DLG_CLASS, L"导出统计数据",
-            WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-            x, y, dlgW, dlgH, statsCtx->hDlg, NULL, m_hInst, NULL);
-        if (!hDlg) { UnregisterClassW(DLG_CLASS, m_hInst); return; }
-
-        ExportCtx* ctx = new ExportCtx();
-        ctx->hDlg = hDlg;
-        SetWindowLongPtrW(hDlg, GWLP_USERDATA, (LONG_PTR)ctx);
-
-        // 导出格式
-        CreateWindowExW(0, L"BUTTON", L"导出格式",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            15, 12, dlgW - 30, 52, hDlg, NULL, m_hInst, NULL);
-        ctx->hRadioCsv = CreateWindowExW(0, L"BUTTON", L"CSV (Excel)",
-            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP,
-            30, 32, 130, 22, hDlg, (HMENU)600, m_hInst, NULL);
-        ctx->hRadioJson = CreateWindowExW(0, L"BUTTON", L"JSON",
-            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_TABSTOP,
-            170, 32, 100, 22, hDlg, (HMENU)601, m_hInst, NULL);
-        SendMessageW(ctx->hRadioCsv, BM_SETCHECK, BST_CHECKED, 0);
-
-        // 导出内容
-        CreateWindowExW(0, L"BUTTON", L"导出内容",
-            WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
-            15, 72, dlgW - 30, 140, hDlg, NULL, m_hInst, NULL);
-        ctx->hChkDaily = CreateWindowExW(0, L"BUTTON", L"每日听歌记录 (日期/星期/时长)",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-            30, 92, dlgW - 60, 22, hDlg, (HMENU)602, m_hInst, NULL);
-        ctx->hChkWeekly = CreateWindowExW(0, L"BUTTON", L"每周统计 (周次/日期范围/时长)",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-            30, 118, dlgW - 60, 22, hDlg, (HMENU)603, m_hInst, NULL);
-        ctx->hChkTop = CreateWindowExW(0, L"BUTTON", L"常听歌曲排行 (前 20)",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-            30, 144, dlgW - 60, 22, hDlg, (HMENU)604, m_hInst, NULL);
-        ctx->hChkTotal = CreateWindowExW(0, L"BUTTON", L"总计",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-            30, 170, dlgW - 60, 22, hDlg, (HMENU)605, m_hInst, NULL);
-        SendMessageW(ctx->hChkDaily, BM_SETCHECK, BST_CHECKED, 0);
-        SendMessageW(ctx->hChkWeekly, BM_SETCHECK, BST_CHECKED, 0);
-        SendMessageW(ctx->hChkTop, BM_SETCHECK, BST_CHECKED, 0);
-        SendMessageW(ctx->hChkTotal, BM_SETCHECK, BST_CHECKED, 0);
-
-        // 按钮
-        CreateWindowExW(0, L"BUTTON", L"导出",
-            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            dlgW / 2 - 115, 224, 90, 30, hDlg, (HMENU)IDOK, m_hInst, NULL);
-        CreateWindowExW(0, L"BUTTON", L"取消",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            dlgW / 2 + 25, 224, 90, 30, hDlg, (HMENU)IDCANCEL, m_hInst, NULL);
-
-        EnableWindow(m_hwnd, FALSE);
-        EnableWindow(statsCtx->hDlg, FALSE);
-        MSG msg;
-        while (IsWindow(hDlg) && GetMessageW(&msg, NULL, 0, 0)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-        EnableWindow(statsCtx->hDlg, TRUE);
-        EnableWindow(m_hwnd, TRUE);
-        SetForegroundWindow(statsCtx->hDlg);
-
-        if (ctx->result == 1) {
-            DoExportStats(statsCtx, ctx->asCsv,
-                ctx->includeDaily, ctx->includeWeekly, ctx->includeTopSongs, ctx->includeTotal);
-        }
-        delete ctx;
-        UnregisterClassW(DLG_CLASS, m_hInst);
-    }
-
-    // 按所选格式与勾选项导出统计数据到用户指定文件
-    void DoExportStats(StatsDlgCtx* statsCtx, bool asCsv,
-                       bool includeDaily, bool includeWeekly,
-                       bool includeTopSongs, bool includeTotal) {
-        std::string fromDate, toDate;
-        ComputeStatsRange(statsCtx, fromDate, toDate);
-
-        StatsExportData data;
-        data.dailyRecords = m_history.GetDailyRecords(fromDate, toDate);
-        data.weeklyRecords = m_history.GetWeeklySummaries(fromDate, toDate);
-        data.totalSeconds = m_history.GetTotalSeconds(fromDate, toDate);
-
-        std::vector<std::pair<std::wstring, int>> sorted(m_playCount.begin(), m_playCount.end());
-        std::sort(sorted.begin(), sorted.end(),
-            [](const auto& a, const auto& b) { return a.second > b.second; });
-        int limit = (int)sorted.size() < 20 ? (int)sorted.size() : 20;
-        for (int i = 0; i < limit; i++) {
-            data.topSongs.push_back({ GetDisplayName(sorted[i].first), sorted[i].second });
-        }
-
-        ExportOptions opt;
-        opt.asCsv = asCsv;
-        opt.includeDaily = includeDaily;
-        opt.includeWeekly = includeWeekly;
-        opt.includeTopSongs = includeTopSongs;
-        opt.includeTotal = includeTotal;
-        std::string content = asCsv ? data.ToCsv(opt) : data.ToJson(opt);
-
-        wchar_t filePath[MAX_PATH] = {};
-        OPENFILENAMEW ofn = {};
-        ofn.lStructSize  = sizeof(ofn);
-        ofn.hwndOwner    = statsCtx->hDlg;
-        ofn.lpstrFile    = filePath;
-        ofn.nMaxFile     = MAX_PATH;
-        ofn.lpstrFilter  = L"CSV 文件 (*.csv)\0*.csv\0JSON 文件 (*.json)\0*.json\0所有文件 (*.*)\0*.*\0";
-        ofn.nFilterIndex = asCsv ? 1 : 2;
-        ofn.lpstrDefExt  = asCsv ? L"csv" : L"json";
-        ofn.Flags        = OFN_OVERWRITEPROMPT | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
-        if (!GetSaveFileNameW(&ofn)) return;
-
-        HANDLE hFile = CreateFileW(filePath, GENERIC_WRITE, 0, NULL,
-            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE) {
-            MessageBoxW(statsCtx->hDlg, L"无法写入文件。", L"导出失败", MB_OK | MB_ICONERROR);
-            return;
-        }
-        DWORD written;
-        const BYTE bomUtf8[] = { 0xEF, 0xBB, 0xBF }; // UTF-8 BOM, Excel 依赖它识别编码
-        WriteFile(hFile, bomUtf8, 3, &written, NULL);
-        WriteFile(hFile, content.c_str(), (DWORD)content.size(), &written, NULL);
-        CloseHandle(hFile);
-
-        std::wstring msg = L"统计数据已导出到:\n" + std::wstring(filePath);
-        MessageBoxW(statsCtx->hDlg, msg.c_str(), L"导出完成", MB_OK | MB_ICONINFORMATION);
-    }
-
-    void ShowAboutWindow() {
-        const wchar_t ABOUT_CLASS[] = L"AboutWindow";
-        WNDCLASSEXW wc = {};
-        wc.cbSize        = sizeof(wc);
-        wc.style         = CS_HREDRAW | CS_VREDRAW;
-        wc.lpfnWndProc   = AboutDlgProc;
-        wc.hInstance     = m_hInst;
-        wc.hIcon         = LoadIconW(m_hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
-        wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-        wc.lpszClassName = ABOUT_CLASS;
-        RegisterClassExW(&wc);
-
-        int dlgW = ABOUT_MIN_W, dlgH = ABOUT_MIN_H;
-        int sw = GetSystemMetrics(SM_CXSCREEN);
-        int sh = GetSystemMetrics(SM_CYSCREEN);
-        int x = (sw - dlgW) / 2, y = (sh - dlgH) / 2;
-
-        // 支持用户拉伸 (WS_THICKFRAME), 尺寸上下限由 WM_GETMINMAXINFO 限制
-        HWND hDlg = CreateWindowExW(0, ABOUT_CLASS, L"关于 MusicPlayer",
-            WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MAXIMIZEBOX,
-            x, y, dlgW, dlgH, m_hwnd, NULL, m_hInst, NULL);
-        if (!hDlg) return;
-
-        AboutCtx* ctx = new AboutCtx{};
-        ctx->hDlg = hDlg;
-        SetWindowLongPtrW(hDlg, GWLP_USERDATA, (LONG_PTR)ctx);
-
-        // Use Microsoft YaHei explicitly so the EDIT control has accurate
-        // metrics for CJK text.  Using NULL as typeface lets the font mapper
-        // pick a default that lacks CJK glyphs, forcing font linking — the
-        // linked CJK font's real glyph extent can exceed tmHeight reported
-        // by the base font, clipping character bottoms on every visible row.
-        ctx->hGuiFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei");
-        ctx->hTitleFont = CreateFontW(-18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei");
-
-        // Query font line height (ascent + descent in logical units)
-        HDC hdc = GetDC(hDlg);
-        HFONT hOldFont = (HFONT)SelectObject(hdc, ctx->hGuiFont);
-        TEXTMETRICW tm;
-        GetTextMetricsW(hdc, &tm);
-        SelectObject(hdc, hOldFont);
-        ReleaseDC(hDlg, hdc);
-        ctx->lineH = tm.tmHeight;
-
-        // 子控件位置统一由 LayoutAboutControls 计算
-        ctx->hTitle = CreateWindowExW(0, L"STATIC", L"MusicPlayer",
-            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hDlg, NULL, m_hInst, NULL);
-        SendMessageW(ctx->hTitle, WM_SETFONT, (WPARAM)ctx->hTitleFont, TRUE);
-
-        wchar_t verBuf[64];
-        swprintf(verBuf, 64, L"版本: %ls", APP_VERSION);
-        ctx->hVersion = CreateWindowExW(0, L"STATIC", verBuf,
-            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hDlg, NULL, m_hInst, NULL);
-        SendMessageW(ctx->hVersion, WM_SETFONT, (WPARAM)ctx->hGuiFont, TRUE);
-
-        ctx->hChangelogLabel = CreateWindowExW(0, L"STATIC", L"更新历史:",
-            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hDlg, NULL, m_hInst, NULL);
-        SendMessageW(ctx->hChangelogLabel, WM_SETFONT, (WPARAM)ctx->hGuiFont, TRUE);
-
-        ctx->hChangelog = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", CHANGELOG,
-            WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY |
-            ES_AUTOVSCROLL | WS_VSCROLL | ES_LEFT,
-            0, 0, 0, 0, hDlg, NULL, m_hInst, NULL);
-        SendMessageW(ctx->hChangelog, WM_SETFONT, (WPARAM)ctx->hGuiFont, TRUE);
-        SendMessageW(ctx->hChangelog, EM_SETSEL, 0, 0);
-
-        ctx->hClose = CreateWindowExW(0, L"BUTTON", L"确定",
-            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            0, 0, 0, 0, hDlg, (HMENU)IDOK, m_hInst, NULL);
-        SendMessageW(ctx->hClose, WM_SETFONT, (WPARAM)ctx->hGuiFont, TRUE);
-
-        LayoutAboutControls(ctx);
-        ShowWindow(hDlg, SW_SHOW);
-    }
-
-    void RefreshStatsDisplay(StatsDlgCtx* ctx) {
-        std::string fromDate, toDate;
-        ComputeStatsRange(ctx, fromDate, toDate);
-
-        auto daily = m_history.GetDailyRecords(fromDate, toDate);
-        double total = m_history.GetTotalSeconds(fromDate, toDate);
-        auto weekly = m_history.GetWeeklySummaries(fromDate, toDate);
-
-        ListView_DeleteAllItems(ctx->hDayList);
-        for (size_t i = 0; i < daily.size(); i++) {
-            LVITEMW item = {};
-            item.mask = LVIF_TEXT;
-            item.iItem = (int)i;
-            item.pszText = (LPWSTR)daily[i].date.c_str();
-            ListView_InsertItem(ctx->hDayList, &item);
-            ListView_SetItemText(ctx->hDayList, (int)i, 1, (LPWSTR)daily[i].weekday.c_str());
-            wchar_t tbuf[64];
-            FormatListenTime(daily[i].seconds, tbuf, 64);
-            ListView_SetItemText(ctx->hDayList, (int)i, 2, tbuf);
-        }
-
-        ListView_DeleteAllItems(ctx->hWeekList);
-        for (size_t i = 0; i < weekly.size(); i++) {
-            LVITEMW item = {};
-            item.mask = LVIF_TEXT;
-            item.iItem = (int)i;
-            item.pszText = (LPWSTR)weekly[i].label.c_str();
-            ListView_InsertItem(ctx->hWeekList, &item);
-            ListView_SetItemText(ctx->hWeekList, (int)i, 1, (LPWSTR)weekly[i].dateRange.c_str());
-            wchar_t tbuf[64];
-            FormatListenTime(weekly[i].seconds, tbuf, 64);
-            ListView_SetItemText(ctx->hWeekList, (int)i, 2, tbuf);
-        }
-
-        // Play count
-        ListView_DeleteAllItems(ctx->hPlayCountList);
-        // Sort by count descending, take top 20
-        std::vector<std::pair<std::wstring, int>> sorted(m_playCount.begin(), m_playCount.end());
-        std::sort(sorted.begin(), sorted.end(),
-            [](const auto& a, const auto& b) { return a.second > b.second; });
-        int limit = (int)sorted.size() < 20 ? (int)sorted.size() : 20;
-        for (int i = 0; i < limit; i++) {
-            wchar_t rank[8];
-            swprintf(rank, 8, L"%d", i + 1);
-            LVITEMW item = {};
-            item.mask = LVIF_TEXT;
-            item.iItem = i;
-            item.pszText = rank;
-            ListView_InsertItem(ctx->hPlayCountList, &item);
-            ListView_SetItemText(ctx->hPlayCountList, i, 1, (LPWSTR)GetDisplayName(sorted[i].first).c_str());
-            wchar_t cnt[16];
-            swprintf(cnt, 16, L"%d", sorted[i].second);
-            ListView_SetItemText(ctx->hPlayCountList, i, 2, cnt);
-        }
-
-        wchar_t tbuf[128], label[256];
-        FormatListenTime(total, tbuf, 128);
-        swprintf(label, 256, L"总计: %ls", tbuf);
-        SetWindowTextW(ctx->hTotalText, label);
-    }
-
-
-    // Listening time tracking
     void StartListening() {
         if (!m_listening) {
             m_listening = true;
@@ -3220,112 +2334,17 @@ private:
     
     void SaveSettings() {
         SaveHotkeyBindings();
-        std::wstring filePath = GetExeDirectory() + L"\\.settings.txt";
-        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
-            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE) return;
-        DWORD written;
-        char buf[300];
-        int len = sprintf(buf, "autoplay=%d\nremember_progress=%d\ntray_minimize=%d\nplay_mode=%d\nplay_speed=%.2f\nloudness_balance=%d\nlyrics_show=%d\nlyrics_color=#%02X%02X%02X\nlyrics_nextcolor=#%02X%02X%02X\nlyrics_locked=%d\nlyrics_translation=%d\nlyrics_fontsize=%d\nlyrics_secondfontsize=%d\n",
-                          m_settingsAutoplay,
-                          m_settingsRememberProgress ? 1 : 0,
-                          m_settingsTray ? 1 : 0,
-                          (int)m_audio.GetPlayMode(),
-                          m_audio.GetSpeed(),
-                          m_balanceEnabled ? 1 : 0,
-                          m_settingsLyricsShow ? 1 : 0,
-                          (unsigned)GetRValue(m_lyricsColor), (unsigned)GetGValue(m_lyricsColor), (unsigned)GetBValue(m_lyricsColor),
-                          (unsigned)GetRValue(m_lyricsNextColor), (unsigned)GetGValue(m_lyricsNextColor), (unsigned)GetBValue(m_lyricsNextColor),
-                          m_settingsLyricsLocked ? 1 : 0,
-                          m_settingsLyricsTranslation ? 1 : 0,
-                          m_lyricsFontSize,
-                          m_lyricsSecondFontSize);
-        WriteFile(hFile, buf, (DWORD)len, &written, NULL);
-        CloseHandle(hFile);
+        m_settings.playMode = (int)m_audio.GetPlayMode();
+        m_settings.playSpeed = m_audio.GetSpeed();
+        m_settings.Save(GetExeDirectory() + L"\\.settings.txt");
     }
 
     void LoadSettings() {
         LoadHotkeyBindings();
-
-        // Now read just the plain settings
-        std::wstring filePath = GetExeDirectory() + L"\\.settings.txt";
-        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
-            FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE) return;
-
-        DWORD size = GetFileSize(hFile, NULL);
-        int mode = 0;
-        int balanceEnabled = 1;
-        int lyricsShow = 0;
-        int lyricsLocked = 0;
-        int lyricsTranslation = 0;
-        int lyricsFontSize = 30;
-        int lyricsSecondFontSize = 20;
-        double speed = 1.0;
-        if (size > 0 && size < 2048) {
-            char buf[2048] = {};
-            DWORD read;
-            ReadFile(hFile, buf, size, &read, NULL);
-            char* p = buf;
-            while (*p) {
-                char* nl = strchr(p, '\n');
-                if (!nl) nl = p + strlen(p);
-                *nl = '\0';
-                if (strncmp(p, "hk_", 3) != 0) {
-                    if (sscanf(p, "autoplay=%d", &m_settingsAutoplay) == 1) {}
-                    else if (sscanf(p, "remember_progress=%d", &m_settingsRememberProgress) == 1) {}
-                    else if (sscanf(p, "tray_minimize=%d", &m_settingsTray) == 1) {}
-                    else if (sscanf(p, "loudness_balance=%d", &balanceEnabled) == 1) {
-                        m_balanceEnabled = (balanceEnabled != 0);
-                        m_audio.SetBalanceEnabled(m_balanceEnabled);
-                    }
-                    else if (sscanf(p, "lyrics_show=%d", &lyricsShow) == 1) {
-                        m_settingsLyricsShow = (lyricsShow != 0);
-                    }
-                    else if (strncmp(p, "lyrics_color=", 13) == 0) {
-                        std::wstring hex;
-                        for (char* q = p + 13; *q; ++q) hex += (wchar_t)(unsigned char)*q;
-                        COLORREF c;
-                        if (ParseColor(hex, c)) m_lyricsColor = c;
-                    }
-                    else if (strncmp(p, "lyrics_nextcolor=", 17) == 0) {
-                        std::wstring hex;
-                        for (char* q = p + 17; *q; ++q) hex += (wchar_t)(unsigned char)*q;
-                        COLORREF c;
-                        if (ParseColor(hex, c)) m_lyricsNextColor = c;
-                    }
-                    else if (sscanf(p, "lyrics_locked=%d", &lyricsLocked) == 1) {
-                        m_settingsLyricsLocked = (lyricsLocked != 0);
-                    }
-                    else if (sscanf(p, "lyrics_translation=%d", &lyricsTranslation) == 1) {
-                        m_settingsLyricsTranslation = (lyricsTranslation != 0);
-                    }
-                    else if (sscanf(p, "lyrics_fontsize=%d", &lyricsFontSize) == 1) {
-                        m_lyricsFontSize = lyricsFontSize;
-                        if (m_lyricsFontSize < 12) m_lyricsFontSize = 12;
-                        if (m_lyricsFontSize > 72) m_lyricsFontSize = 72;
-                    }
-                    else if (sscanf(p, "lyrics_secondfontsize=%d", &lyricsSecondFontSize) == 1) {
-                        m_lyricsSecondFontSize = lyricsSecondFontSize;
-                        if (m_lyricsSecondFontSize < 12) m_lyricsSecondFontSize = 12;
-                        if (m_lyricsSecondFontSize > 72) m_lyricsSecondFontSize = 72;
-                    }
-                    else if (sscanf(p, "play_mode=%d", &mode) == 1) {
-                        if (mode >= 0 && mode <= 2) {
-                            m_audio.SetPlayMode(static_cast<PlayMode>(mode));
-                        }
-                    }
-                    else if (sscanf(p, "play_speed=%lf", &speed) == 1) {
-                        if (speed >= 0.1 && speed <= 10.0) {
-                            m_audio.SetSpeed(speed);
-                        }
-                    }
-                }
-                p = nl + 1;
-            }
-            UpdateSpeedMenu();
-        }
-        CloseHandle(hFile);
+        m_settings.Load(GetExeDirectory() + L"\\.settings.txt");
+        m_audio.SetBalanceEnabled(m_settings.balanceEnabled);
+        m_audio.SetPlayMode(static_cast<PlayMode>(m_settings.playMode));
+        m_audio.SetSpeed(m_settings.playSpeed);
     }
 
 
@@ -3366,14 +2385,14 @@ private:
     // 同步「词」按钮勾选状态
     void UpdateLyricButton() {
         if (m_btnLyrics) {
-            SendMessageW(m_btnLyrics, BM_SETCHECK, m_settingsLyricsShow ? BST_CHECKED : BST_UNCHECKED, 0);
+            SendMessageW(m_btnLyrics, BM_SETCHECK, m_settings.lyricsShow ? BST_CHECKED : BST_UNCHECKED, 0);
             InvalidateRect(m_btnLyrics, NULL, TRUE);
         }
     }
 
     // 统一设置桌面歌词显示状态 (按钮/菜单/托盘/右键共用)
     void SetLyricsVisible(bool on) {
-        m_settingsLyricsShow = on;
+        m_settings.lyricsShow = on;
         if (on) ShowLyricWindow();
         else m_lyricWindow.Hide();
         UpdateLyricButton();
@@ -3473,94 +2492,21 @@ private:
 
     // 歌词设置对话框: 颜色(十六进制/RGB) + 字号
     void ShowLyricsSettingsDialog() {
-        const wchar_t DLG_CLASS[] = L"LyricsSettingsDlg";
-        WNDCLASSEXW wc = {};
-        wc.cbSize        = sizeof(wc);
-        wc.style         = CS_HREDRAW | CS_VREDRAW;
-        wc.lpfnWndProc   = LyricsSettingsDlgProc;
-        wc.hInstance     = m_hInst;
-        wc.hIcon         = LoadIcon(NULL, IDI_APPLICATION);
-        wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-        wc.lpszClassName = DLG_CLASS;
-        if (!RegisterClassExW(&wc)) return;
-
-        int dlgW = 400, dlgH = 270;
-        int sw = GetSystemMetrics(SM_CXSCREEN);
-        int sh = GetSystemMetrics(SM_CYSCREEN);
-        int x = (sw - dlgW) / 2, y = (sh - dlgH) / 2;
-
-        HWND hDlg = CreateWindowExW(0, DLG_CLASS, L"歌词设置",
-            WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-            x, y, dlgW, dlgH, m_hwnd, NULL, m_hInst, NULL);
-        if (!hDlg) return;
-
-        struct LyricCtx { MainWindow* win; bool ok; COLORREF color; COLORREF nextColor; int fontSize; int secondFontSize; };
-        LyricCtx* ctx = new LyricCtx{ this, false, m_lyricsColor, m_lyricsNextColor, m_lyricsFontSize, m_lyricsSecondFontSize };
-        SetWindowLongPtrW(hDlg, GWLP_USERDATA, (LONG_PTR)ctx);
-
-        CreateWindowExW(0, L"STATIC", L"颜色格式: #RRGGBB 或 R,G,B",
-            WS_CHILD | WS_VISIBLE, 15, 12, 370, 18, hDlg, NULL, m_hInst, NULL);
-
-        CreateWindowExW(0, L"STATIC", L"首行颜色:",
-            WS_CHILD | WS_VISIBLE, 15, 42, 150, 18, hDlg, NULL, m_hInst, NULL);
-        std::wstring hexCur = ColorToHex(m_lyricsColor);
-        CreateWindowExW(0, L"EDIT", hexCur.c_str(),
-            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_CENTER,
-            165, 40, 220, 26, hDlg, (HMENU)501, m_hInst, NULL);
-
-        CreateWindowExW(0, L"STATIC", L"次行颜色:",
-            WS_CHILD | WS_VISIBLE, 15, 76, 150, 18, hDlg, NULL, m_hInst, NULL);
-        std::wstring hexNext = ColorToHex(m_lyricsNextColor);
-        CreateWindowExW(0, L"EDIT", hexNext.c_str(),
-            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_CENTER,
-            165, 74, 220, 26, hDlg, (HMENU)503, m_hInst, NULL);
-
-        CreateWindowExW(0, L"STATIC", L"首行字号 (12 ~ 72):",
-            WS_CHILD | WS_VISIBLE, 15, 110, 150, 18, hDlg, NULL, m_hInst, NULL);
-        wchar_t szBuf[16];
-        swprintf(szBuf, 16, L"%d", m_lyricsFontSize);
-        CreateWindowExW(0, L"EDIT", szBuf,
-            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_CENTER,
-            165, 108, 220, 26, hDlg, (HMENU)502, m_hInst, NULL);
-
-        CreateWindowExW(0, L"STATIC", L"次行字号 (12 ~ 72):",
-            WS_CHILD | WS_VISIBLE, 15, 144, 150, 18, hDlg, NULL, m_hInst, NULL);
-        wchar_t szBuf2[16];
-        swprintf(szBuf2, 16, L"%d", m_lyricsSecondFontSize);
-        CreateWindowExW(0, L"EDIT", szBuf2,
-            WS_CHILD | WS_VISIBLE | WS_BORDER | ES_CENTER,
-            165, 142, 220, 26, hDlg, (HMENU)504, m_hInst, NULL);
-
-        CreateWindowExW(0, L"BUTTON", L"确定",
-            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            dlgW / 2 - 95, 184, 80, 28, hDlg, (HMENU)IDOK, m_hInst, NULL);
-        CreateWindowExW(0, L"BUTTON", L"取消",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            dlgW / 2 + 15, 184, 80, 28, hDlg, (HMENU)IDCANCEL, m_hInst, NULL);
-
-        EnableWindow(m_hwnd, FALSE);
-        MSG msg;
-        while (IsWindow(hDlg) && GetMessageW(&msg, NULL, 0, 0)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-        EnableWindow(m_hwnd, TRUE);
-        SetForegroundWindow(m_hwnd);
-
-        if (ctx->ok) {
-            m_lyricsColor = ctx->color;
-            m_lyricsNextColor = ctx->nextColor;
-            m_lyricsFontSize = ctx->fontSize;
-            m_lyricsSecondFontSize = ctx->secondFontSize;
-            m_lyricWindow.SetColor(m_lyricsColor);
-            m_lyricWindow.SetNextColor(m_lyricsNextColor);
-            m_lyricWindow.SetFontSize(m_lyricsFontSize);
-            m_lyricWindow.SetSecondFontSize(m_lyricsSecondFontSize);
-            SaveSettings();
-        }
-        delete ctx;
-        UnregisterClassW(DLG_CLASS, m_hInst);
+        LyricsStyle style;
+        style.firstColor = m_settings.lyricsColor;
+        style.secondColor = m_settings.lyricsNextColor;
+        style.firstFontSize = m_settings.lyricsFontSize;
+        style.secondFontSize = m_settings.lyricsSecondFontSize;
+        if (!::ShowLyricsSettingsDialog(m_hInst, m_hwnd, style)) return;
+        m_settings.lyricsColor = style.firstColor;
+        m_settings.lyricsNextColor = style.secondColor;
+        m_settings.lyricsFontSize = style.firstFontSize;
+        m_settings.lyricsSecondFontSize = style.secondFontSize;
+        m_lyricWindow.SetColor(m_settings.lyricsColor);
+        m_lyricWindow.SetNextColor(m_settings.lyricsNextColor);
+        m_lyricWindow.SetFontSize(m_settings.lyricsFontSize);
+        m_lyricWindow.SetSecondFontSize(m_settings.lyricsSecondFontSize);
+        SaveSettings();
     }
 
     // Tray icon
@@ -3573,100 +2519,39 @@ private:
             KillTimer(m_hwnd, TIMER_ID_TRAY_READD);
             m_trayReaddActive = false;
         }
-        // 先删后加: 即使 shell 已无该图标, NIM_DELETE 也无害, 可强制清理可能残留的旧状态
-        NOTIFYICONDATAW del = {};
-        del.cbSize = sizeof(del);
-        del.hWnd = m_hwnd;
-        del.uID = 1;
-        Shell_NotifyIconW(NIM_DELETE, &del);
-        m_trayIconAdded = false;  // 即使上次已成功也强制重加, 防止图标再次被系统清除
-        AddTrayIcon();
+        m_trayIcon.Remove();  // 先删后加, 强制清理可能残留的旧状态
+        m_trayIcon.Add(BuildTrayTipText());
     }
 
     // 周期性心跳: 不依赖 TaskbarCreated (Win11 及第三方任务栏可能不广播该消息),
     // 每 5 秒用 NIM_MODIFY 重新断言图标存在并保持可见; 若图标已被系统清除则 NIM_MODIFY
     // 失败, 借此探测并重新 NIM_ADD。
     void OnTrayWatchdog() {
-        if (!m_trayIconAdded) {
-            AddTrayIcon();
-            return;
-        }
-        NOTIFYICONDATAW nid = {};
-        nid.cbSize = sizeof(nid);
-        nid.hWnd = m_hwnd;
-        nid.uID = 1;
-        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_STATE;
-        nid.dwState = 0;
-        nid.dwStateMask = NIS_HIDDEN;  // 清除隐藏位, 强制图标显示在通知区而非被折叠隐藏
-        nid.uCallbackMessage = WM_APP_TRAY;
-        nid.hIcon = LoadIconW(m_hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
-        BuildTrayTipText(nid.szTip, 128);
-        if (!Shell_NotifyIconW(NIM_MODIFY, &nid)) {
-            WriteLog(L"Watchdog: NIM_MODIFY 失败, 图标已被系统清除, 重新 NIM_ADD");
-            m_trayIconAdded = false;
-            AddTrayIcon();
-        }
+        m_trayIcon.Reassert(BuildTrayTipText());
     }
 
     void AddTrayIcon() {
-        if (m_trayIconAdded) return;
-        NOTIFYICONDATAW nid = {};
-        nid.cbSize = sizeof(nid);
-        nid.hWnd = m_hwnd;
-        nid.uID = 1;
-        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_STATE;
-        nid.dwState = 0;
-        nid.dwStateMask = NIS_HIDDEN;  // 清除隐藏位, 强制图标显示在通知区而非被折叠隐藏
-        nid.uCallbackMessage = WM_APP_TRAY;
-        nid.hIcon = LoadIconW(m_hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
-        BuildTrayTipText(nid.szTip, 128);
-        if (!Shell_NotifyIconW(NIM_ADD, &nid)) {
-            WriteLog(L"Shell_NotifyIconW NIM_ADD failed (err=%lu)", GetLastError());
-            return;
-        }
-        m_trayIconAdded = true;
-        WriteLog(L"Shell_NotifyIconW NIM_ADD ok");
+        m_trayIcon.Add(BuildTrayTipText());
     }
 
     void RemoveTrayIcon() {
-        if (!m_trayIconAdded) return;
-        NOTIFYICONDATAW nid = {};
-        nid.cbSize = sizeof(nid);
-        nid.hWnd = m_hwnd;
-        nid.uID = 1;
-        Shell_NotifyIconW(NIM_DELETE, &nid);
-        m_trayIconAdded = false;
+        m_trayIcon.Remove();
     }
 
-    void BuildTrayTipText(wchar_t* buf, int bufLen) {
+    std::wstring BuildTrayTipText() {
         if (m_currentIndex >= 0 && m_currentIndex < m_playlist.GetCount()) {
             std::wstring meta = m_audio.GetFormattedMetadata();
-            std::wstring name;
-            if (!meta.empty())
-                name = meta;
-            else
-                name = GetDisplayName(m_playlist.GetFile(m_currentIndex));
+            std::wstring name = meta.empty() ? GetDisplayName(m_playlist.GetFile(m_currentIndex)) : meta;
             if (m_audio.IsLoaded() && m_audio.IsPlaying())
-                swprintf(buf, bufLen, L"正在播放: %ls", name.c_str());
-            else if (m_audio.IsLoaded())
-                swprintf(buf, bufLen, L"已暂停: %ls", name.c_str());
-            else
-                wcsncpy(buf, WINDOW_TITLE, bufLen - 1);
-        } else {
-            wcsncpy(buf, WINDOW_TITLE, bufLen - 1);
+                return L"正在播放: " + name;
+            if (m_audio.IsLoaded())
+                return L"已暂停: " + name;
         }
-        buf[bufLen - 1] = L'\0';
+        return WINDOW_TITLE;
     }
 
     void UpdateTrayTip() {
-        if (!m_trayIconAdded) return;
-        NOTIFYICONDATAW nid = {};
-        nid.cbSize = sizeof(nid);
-        nid.hWnd = m_hwnd;
-        nid.uID = 1;
-        nid.uFlags = NIF_TIP;
-        BuildTrayTipText(nid.szTip, 128);
-        Shell_NotifyIconW(NIM_MODIFY, &nid);
+        m_trayIcon.UpdateTip(BuildTrayTipText());
     }
 
     void MinimizeToTray() {
@@ -3697,8 +2582,8 @@ private:
             AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
             AppendMenuW(popup, MF_STRING, ID_TRAY_RESTORE, L"显示窗口");
             AppendMenuW(popup, MF_STRING, ID_TRAY_MINIMIZE, L"最小化到托盘");
-            AppendMenuW(popup, MF_STRING | (m_settingsLyricsShow ? MF_CHECKED : MF_UNCHECKED),
-                ID_SETTINGS_LYRICS, m_settingsLyricsShow ? L"关闭桌面歌词" : L"开启桌面歌词");
+            AppendMenuW(popup, MF_STRING | (m_settings.lyricsShow ? MF_CHECKED : MF_UNCHECKED),
+                ID_SETTINGS_LYRICS, m_settings.lyricsShow ? L"关闭桌面歌词" : L"开启桌面歌词");
             AppendMenuW(popup, MF_SEPARATOR, 0, NULL);
             AppendMenuW(popup, MF_STRING, ID_TRAY_EXIT, L"退出");
             POINT pt;
@@ -3979,481 +2864,6 @@ private:
         CloseHandle(hFile);
     }
 };
-
-// Hotkey dialog procedure
-static LRESULT CALLBACK HotkeyDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
-    if (msg == WM_CAPTURECHANGED) {
-        HKDlgCtx* c = (HKDlgCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
-        if (c && c->recording >= 0) {
-            int idx = c->recording;
-            c->recording = -1;
-            std::wstring ks = HotkeyToString(c->bindings[idx].vk, c->bindings[idx].mod);
-            SetWindowTextW(GetDlgItem(hDlg, 100 + idx), ks.c_str());
-        }
-        return 0;
-    }
-    if (msg == WM_CLOSE) { DestroyWindow(hDlg); return 0; }
-    if (msg == WM_COMMAND) {
-        int ctrlId = LOWORD(wp);
-        HKDlgCtx* c = (HKDlgCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
-        if (!c) return DefWindowProcW(hDlg, msg, wp, lp);
-
-        if (ctrlId >= 200 && ctrlId < 200 + c->count) {
-            int idx = ctrlId - 200;
-            c->recording = idx;
-            SetWindowTextW(GetDlgItem(hDlg, 100 + idx), L"[按下新按键...]");
-            SetCapture(hDlg);
-            return 0;
-        }
-        if (ctrlId == 1 || ctrlId == IDOK) {
-            c->result = 1;
-            DestroyWindow(hDlg);
-            return 0;
-        }
-        if (ctrlId == 2 || ctrlId == IDCANCEL) {
-            DestroyWindow(hDlg);
-            return 0;
-        }
-    }
-    return DefWindowProcW(hDlg, msg, wp, lp);
-}
-
-// 统计对话框当前展示的 [from, to] 日期区间 (与列表显示一致)
-static void ComputeStatsRange(const StatsDlgCtx* ctx, std::string& from, std::string& to) {
-    time_t now_t = time(NULL);
-    struct tm tm_now = *localtime(&now_t);
-    char fromBuf[32], toBuf[32];
-    if (ctx->useAllRange) {
-        // 所有: 从最早有记录的那天到今天
-        std::string earliest = ctx->win->GetHistoryEarliestDate();
-        if (earliest.empty()) {
-            snprintf(fromBuf, sizeof(fromBuf), "%04d-%02d-%02d",
-                     tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
-        } else {
-            snprintf(fromBuf, sizeof(fromBuf), "%s", earliest.c_str());
-        }
-        snprintf(toBuf, sizeof(toBuf), "%04d-%02d-%02d",
-                 tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
-    } else if (ctx->useCalendarRange) {
-        snprintf(fromBuf, sizeof(fromBuf), "%04d-%02d-%02d",
-                 ctx->calStart.wYear, ctx->calStart.wMonth, ctx->calStart.wDay);
-        snprintf(toBuf, sizeof(toBuf), "%04d-%02d-%02d",
-                 ctx->calEnd.wYear, ctx->calEnd.wMonth, ctx->calEnd.wDay);
-    } else {
-        tm_now.tm_mday -= ctx->rangeDays;
-        tm_now.tm_isdst = -1;
-        mktime(&tm_now);
-        snprintf(fromBuf, sizeof(fromBuf), "%04d-%02d-%02d",
-                 tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
-
-        struct tm tm_today = *localtime(&now_t);
-        snprintf(toBuf, sizeof(toBuf), "%04d-%02d-%02d",
-                 tm_today.tm_year + 1900, tm_today.tm_mon + 1, tm_today.tm_mday);
-    }
-    from = fromBuf;
-    to = toBuf;
-}
-
-// Compute a SYSTEMTIME offset by `days` from today (negative = past)
-static SYSTEMTIME DateFromNow(int days) {
-    time_t now = time(NULL);
-    struct tm tm = *localtime(&now);
-    tm.tm_mday += days;
-    tm.tm_isdst = -1;
-    mktime(&tm);
-    SYSTEMTIME st = {};
-    st.wYear   = tm.tm_year + 1900;
-    st.wMonth  = tm.tm_mon + 1;
-    st.wDay    = tm.tm_mday;
-    return st;
-}
-
-// Set both DTP controls to reflect a fixed-day range (e.g. 7 or 30)
-static void SyncDtpToRange(StatsDlgCtx* c) {
-    if (!c->hDtpStart || !c->hDtpEnd) return;
-    SYSTEMTIME endSt = DateFromNow(0);
-    SYSTEMTIME startSt = DateFromNow(-c->rangeDays);
-    c->dtpGuard = true;
-    SendMessageW(c->hDtpStart, DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&startSt);
-    SendMessageW(c->hDtpEnd,   DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&endSt);
-    c->dtpGuard = false;
-}
-
-// Validate custom DTP range.
-static bool ValidateCustomRange(StatsDlgCtx* c, HWND hDlg) {
-    SYSTEMTIME nowSt = DateFromNow(0);
-    auto toInt = [](const SYSTEMTIME& s) -> int {
-        return (int)s.wYear * 10000 + (int)s.wMonth * 100 + (int)s.wDay;
-    };
-    int endN = toInt(c->calEnd);
-    int startN = toInt(c->calStart);
-    int todayN = toInt(nowSt);
-
-    bool changed = false;
-    if (endN > todayN) {
-        MessageBoxW(hDlg, L"终止日期不能超过今天，已自动修正。", L"日期范围", MB_OK | MB_ICONINFORMATION);
-        c->calEnd = nowSt;
-        changed = true;
-    }
-    if (startN > endN) {
-        MessageBoxW(hDlg, L"起始日期晚于终止日期，已自动修正。", L"日期范围", MB_OK | MB_ICONINFORMATION);
-        c->calStart = c->calEnd;
-        changed = true;
-    }
-    if (changed) {
-        c->dtpGuard = true;
-        SendMessageW(c->hDtpStart, DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&c->calStart);
-        SendMessageW(c->hDtpEnd,   DTM_SETSYSTEMTIME, GDT_VALID, (LPARAM)&c->calEnd);
-        c->dtpGuard = false;
-    }
-    return true;
-}
-
-// Distribute extra space vertically to the three list views proportionally,
-// and reflow DTPs / "刷新" horizontally.
-static void LayoutStatsControls(StatsDlgCtx* c, int clientW, int clientH) {
-    int extraH = clientH - c->baseH;
-    int totalBaseH = c->hDay + c->hWeek + c->hPlay;
-
-    auto scaleH = [&](int baseH) -> int {
-        return baseH + extraH * baseH / totalBaseH;
-    };
-
-    int newDayH  = scaleH(c->hDay);
-    int newWeekH = scaleH(c->hWeek);
-    int newPlayH = scaleH(c->hPlay);
-
-    int shiftDay  = newDayH - c->hDay;
-    int shiftWeek = shiftDay + (newWeekH - c->hWeek);
-
-    int margin = 15;
-    int listW = (clientW > margin * 2) ? clientW - margin * 2 : 200;
-
-    SetWindowPos(c->hDayList, NULL, margin, c->yDayList, listW, newDayH, SWP_NOZORDER | SWP_NOACTIVATE);
-    SetWindowPos(c->hLabelDay, NULL, margin, c->yDayList - 20, listW, 20, SWP_NOZORDER | SWP_NOACTIVATE);
-    SetWindowPos(c->hWeekList, NULL, margin, c->yWeekList + shiftDay, listW, newWeekH, SWP_NOZORDER | SWP_NOACTIVATE);
-    SetWindowPos(c->hLabelWeek, NULL, margin, c->yWeekList + shiftDay - 20, listW, 20, SWP_NOZORDER | SWP_NOACTIVATE);
-    SetWindowPos(c->hPlayCountList, NULL, margin, c->yPlayList + shiftWeek, listW, newPlayH, SWP_NOZORDER | SWP_NOACTIVATE);
-    SetWindowPos(c->hLabelPlay, NULL, margin, c->yPlayList + shiftWeek - 20, listW, 20, SWP_NOZORDER | SWP_NOACTIVATE);
-    SetWindowPos(c->hTotalText, NULL, margin, c->yTotal + extraH, listW, 22, SWP_NOZORDER | SWP_NOACTIVATE);
-
-    int btnY = c->yButtons + extraH;
-    SetWindowPos(GetDlgItem(c->hDlg, 305), NULL, clientW / 2 - 120, btnY, 120, 28, SWP_NOZORDER | SWP_NOACTIVATE);
-    SetWindowPos(GetDlgItem(c->hDlg, IDCANCEL), NULL, clientW / 2 + 20, btnY, 90, 28, SWP_NOZORDER | SWP_NOACTIVATE);
-
-    // Horizontal: widen DTPs, move labels, right-align "刷新"
-    if (c->hDtpStart && c->hDtpEnd) {
-        int dtpX = 50, dtpW = 130;
-        int avail = clientW - dtpX - 110;
-        if (avail > dtpW * 2 + 80) {
-            dtpW = (avail - 80) / 2;
-            if (dtpW > 250) dtpW = 250;
-        }
-        int dtp2X = dtpX + dtpW + 55;
-        int dtpY = c->yDayList - 54;
-        SetWindowPos(c->hDtpStart, NULL, dtpX, dtpY, dtpW, 26, SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(c->hDtpEnd, NULL, dtp2X, dtpY, dtpW, 26, SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(GetDlgItem(c->hDlg, 312), NULL, 15, dtpY + 3, 35, 20, SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(GetDlgItem(c->hDlg, 313), NULL, dtp2X - 35, dtpY + 3, 35, 20, SWP_NOZORDER | SWP_NOACTIVATE);
-    }
-    SetWindowPos(GetDlgItem(c->hDlg, 304), NULL, clientW - 100, c->yDayList - 56, 80, 28, SWP_NOZORDER | SWP_NOACTIVATE);
-}
-
-// Stats dialog procedure
-static LRESULT CALLBACK StatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
-    if (msg == WM_GETMINMAXINFO) {
-        MINMAXINFO* mmi = (MINMAXINFO*)lp;
-        mmi->ptMinTrackSize.x = 660;
-        mmi->ptMinTrackSize.y = 620;
-        mmi->ptMaxTrackSize.x = 1400;
-        mmi->ptMaxTrackSize.y = 1200;
-        return 0;
-    }
-    if (msg == WM_SIZE && wp != SIZE_MINIMIZED) {
-        StatsDlgCtx* c = (StatsDlgCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
-        if (c && c->baseH > 0) {
-            LayoutStatsControls(c, LOWORD(lp), HIWORD(lp));
-        }
-        return 0;
-    }
-    if (msg == WM_CLOSE) { DestroyWindow(hDlg); return 0; }
-    if (msg == WM_DESTROY) {
-        StatsDlgCtx* c = (StatsDlgCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
-        if (c) {
-            HWND hOwner = GetWindow(hDlg, GW_OWNER);
-            delete c;
-            SetWindowLongPtrW(hDlg, GWLP_USERDATA, 0);
-            // Post a message to bring the owner to foreground after
-            // DestroyWindow fully completes. Direct SetForegroundWindow
-            // inside WM_DESTROY can be overridden by Windows internal
-            // focus processing during window destruction.
-            if (hOwner && IsWindow(hOwner)) {
-                PostMessage(hOwner, WM_APP_BRING_TO_TOP, 0, 0);
-            }
-        } else {
-            SetWindowLongPtrW(hDlg, GWLP_USERDATA, 0);
-        }
-        return 0;
-    }
-    if (msg == WM_NOTIFY) {
-        LPNMHDR nm = (LPNMHDR)lp;
-        if (nm->code == DTN_DATETIMECHANGE && (nm->idFrom == 310 || nm->idFrom == 311)) {
-            StatsDlgCtx* c = (StatsDlgCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
-            if (!c || c->dtpGuard) return 0;
-            SYSTEMTIME st;
-            if (SendMessageW(nm->hwndFrom, DTM_GETSYSTEMTIME, 0, (LPARAM)&st) != GDT_VALID)
-                return 0;
-            if (nm->idFrom == 310) c->calStart = st;
-            else c->calEnd = st;
-            c->useAllRange = false;
-            c->useCalendarRange = true;
-            ValidateCustomRange(c, hDlg);
-            SendMessageW(c->hRadioAll, BM_SETCHECK, BST_UNCHECKED, 0);
-            SendMessageW(c->hRadio7, BM_SETCHECK, BST_UNCHECKED, 0);
-            SendMessageW(c->hRadio30, BM_SETCHECK, BST_UNCHECKED, 0);
-            SendMessageW(c->hRadioCustom, BM_SETCHECK, BST_CHECKED, 0);
-            c->win->RefreshStatsDisplay(c);
-            return 0;
-        }
-        return DefWindowProcW(hDlg, msg, wp, lp);
-    }
-    if (msg == WM_COMMAND) {
-        StatsDlgCtx* c = (StatsDlgCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
-        if (!c) return DefWindowProcW(hDlg, msg, wp, lp);
-        int id = LOWORD(wp);
-
-        if (id == IDCANCEL) {
-            DestroyWindow(hDlg);
-            return 0;
-        }
-
-        if (id == 304) { // Refresh button
-            if (SendMessageW(c->hRadioAll, BM_GETCHECK, 0, 0) == BST_CHECKED) {
-                c->useAllRange = true;
-                c->useCalendarRange = false;
-            }
-            else if (SendMessageW(c->hRadio7, BM_GETCHECK, 0, 0) == BST_CHECKED) {
-                c->useAllRange = false;
-                c->useCalendarRange = false;
-                c->rangeDays = 7;
-            }
-            else if (SendMessageW(c->hRadio30, BM_GETCHECK, 0, 0) == BST_CHECKED) {
-                c->useAllRange = false;
-                c->useCalendarRange = false;
-                c->rangeDays = 30;
-            }
-            else {
-                SYSTEMTIME st;
-                if (c->hDtpStart && SendMessageW(c->hDtpStart, DTM_GETSYSTEMTIME, 0, (LPARAM)&st) == GDT_VALID)
-                    c->calStart = st;
-                if (c->hDtpEnd && SendMessageW(c->hDtpEnd, DTM_GETSYSTEMTIME, 0, (LPARAM)&st) == GDT_VALID)
-                    c->calEnd = st;
-                c->useAllRange = false;
-                c->useCalendarRange = true;
-                ValidateCustomRange(c, hDlg);
-            }
-            c->win->RefreshStatsDisplay(c);
-            return 0;
-        }
-
-        if (id == 300) { // Radio 7
-            c->useAllRange = false;
-            c->useCalendarRange = false;
-            c->rangeDays = 7;
-            SyncDtpToRange(c);
-            c->win->RefreshStatsDisplay(c);
-            return 0;
-        }
-        if (id == 301) { // Radio 30
-            c->useAllRange = false;
-            c->useCalendarRange = false;
-            c->rangeDays = 30;
-            SyncDtpToRange(c);
-            c->win->RefreshStatsDisplay(c);
-            return 0;
-        }
-        if (id == 302) { // Radio Custom
-            c->useAllRange = false;
-            c->useCalendarRange = true;
-            c->win->RefreshStatsDisplay(c);
-            return 0;
-        }
-        if (id == 303) { // Radio All
-            c->useAllRange = true;
-            c->useCalendarRange = false;
-            c->win->RefreshStatsDisplay(c);
-            return 0;
-        }
-
-        if (id == 305) { // Export button
-            c->win->ShowExportStatsDialog(c);
-            return 0;
-        }
-        return 0;
-    }
-    return DefWindowProcW(hDlg, msg, wp, lp);
-}
-
-// Stats export selection dialog proc
-static LRESULT CALLBACK ExportStatsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
-    if (msg == WM_CLOSE) {
-        DestroyWindow(hDlg);
-        return 0;
-    }
-    if (msg == WM_COMMAND) {
-        ExportCtx* c = (ExportCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
-        if (!c) return DefWindowProcW(hDlg, msg, wp, lp);
-        int id = LOWORD(wp);
-        if (id == IDOK) {
-            bool chkDaily = SendMessageW(c->hChkDaily, BM_GETCHECK, 0, 0) == BST_CHECKED;
-            bool chkWeekly = SendMessageW(c->hChkWeekly, BM_GETCHECK, 0, 0) == BST_CHECKED;
-            bool chkTop = SendMessageW(c->hChkTop, BM_GETCHECK, 0, 0) == BST_CHECKED;
-            bool chkTotal = SendMessageW(c->hChkTotal, BM_GETCHECK, 0, 0) == BST_CHECKED;
-            if (!chkDaily && !chkWeekly && !chkTop && !chkTotal) {
-                MessageBoxW(hDlg, L"请至少勾选一项导出内容。", L"提示", MB_OK | MB_ICONINFORMATION);
-                return 0;
-            }
-            c->result = 1;
-            c->asCsv = SendMessageW(c->hRadioCsv, BM_GETCHECK, 0, 0) == BST_CHECKED;
-            c->includeDaily = chkDaily;
-            c->includeWeekly = chkWeekly;
-            c->includeTopSongs = chkTop;
-            c->includeTotal = chkTotal;
-            DestroyWindow(hDlg);
-            return 0;
-        }
-        if (id == IDCANCEL) {
-            DestroyWindow(hDlg);
-            return 0;
-        }
-    }
-    return DefWindowProcW(hDlg, msg, wp, lp);
-}
-
-// Speed input dialog proc
-static LRESULT CALLBACK SpeedInputDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
-    if (msg == WM_CLOSE) {
-        DestroyWindow(hDlg);
-        return 0;
-    }
-    if (msg == WM_COMMAND) {
-        int id = LOWORD(wp);
-        if (id == IDOK) {
-            wchar_t buf[16];
-            GetWindowTextW(GetDlgItem(hDlg, 500), buf, 16);
-            double val = _wtof(buf);
-            if (val < 0.1 || val > 10.0) {
-                MessageBoxW(hDlg, L"请输入 0.1 ~ 10.0 之间的数值", L"无效输入", MB_OK | MB_ICONWARNING);
-                return 0;
-            }
-            // Store result in context
-            struct SpeedCtx { MainWindow* win; double result; };
-            SpeedCtx* ctx = (SpeedCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
-            if (ctx) ctx->result = val;
-            DestroyWindow(hDlg);
-            return 0;
-        }
-        if (id == IDCANCEL) {
-            DestroyWindow(hDlg);
-            return 0;
-        }
-    }
-    return DefWindowProcW(hDlg, msg, wp, lp);
-}
-
-static LRESULT CALLBACK LyricsSettingsDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
-    if (msg == WM_CLOSE) {
-        DestroyWindow(hDlg);
-        return 0;
-    }
-    if (msg == WM_COMMAND) {
-        int id = LOWORD(wp);
-        if (id == IDOK) {
-            struct LyricCtx { MainWindow* win; bool ok; COLORREF color; COLORREF nextColor; int fontSize; int secondFontSize; };
-            LyricCtx* ctx = (LyricCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
-            if (ctx) {
-                wchar_t colorBuf[64];
-                GetWindowTextW(GetDlgItem(hDlg, 501), colorBuf, 64);
-                COLORREF color;
-                if (!ParseColor(colorBuf, color)) {
-                    MessageBoxW(hDlg, L"首行颜色格式无效，请输入 #RRGGBB 或 R,G,B", L"无效输入", MB_OK | MB_ICONWARNING);
-                    return 0;
-                }
-                wchar_t nextBuf[64];
-                GetWindowTextW(GetDlgItem(hDlg, 503), nextBuf, 64);
-                COLORREF nextColor;
-                if (!ParseColor(nextBuf, nextColor)) {
-                    MessageBoxW(hDlg, L"次行颜色格式无效，请输入 #RRGGBB 或 R,G,B", L"无效输入", MB_OK | MB_ICONWARNING);
-                    return 0;
-                }
-                wchar_t sizeBuf[16];
-                GetWindowTextW(GetDlgItem(hDlg, 502), sizeBuf, 16);
-                int fontSize = _wtoi(sizeBuf);
-                if (fontSize < 12 || fontSize > 72) {
-                    MessageBoxW(hDlg, L"首行字号需在 12 ~ 72 之间", L"无效输入", MB_OK | MB_ICONWARNING);
-                    return 0;
-                }
-                wchar_t sizeBuf2[16];
-                GetWindowTextW(GetDlgItem(hDlg, 504), sizeBuf2, 16);
-                int secondFontSize = _wtoi(sizeBuf2);
-                if (secondFontSize < 12 || secondFontSize > 72) {
-                    MessageBoxW(hDlg, L"次行字号需在 12 ~ 72 之间", L"无效输入", MB_OK | MB_ICONWARNING);
-                    return 0;
-                }
-                ctx->color = color;
-                ctx->nextColor = nextColor;
-                ctx->fontSize = fontSize;
-                ctx->secondFontSize = secondFontSize;
-                ctx->ok = true;
-            }
-            DestroyWindow(hDlg);
-            return 0;
-        }
-        if (id == IDCANCEL) {
-            DestroyWindow(hDlg);
-            return 0;
-        }
-    }
-    return DefWindowProcW(hDlg, msg, wp, lp);
-}
-
-static LRESULT CALLBACK AboutDlgProc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
-    AboutCtx* ctx = (AboutCtx*)GetWindowLongPtrW(hDlg, GWLP_USERDATA);
-    if (msg == WM_GETMINMAXINFO) {
-        MINMAXINFO* mmi = (MINMAXINFO*)lp;
-        mmi->ptMinTrackSize.x = ABOUT_MIN_W;
-        mmi->ptMinTrackSize.y = ABOUT_MIN_H;
-        mmi->ptMaxTrackSize.x = ABOUT_MAX_W;
-        mmi->ptMaxTrackSize.y = ABOUT_MAX_H;
-        return 0;
-    }
-    // WM_SIZE 在 CreateWindowExW 期间可能早于 GWLP_USERDATA 设置, ctx 为空时跳过
-    if (msg == WM_SIZE && ctx) {
-        LayoutAboutControls(ctx);
-        return 0;
-    }
-    if (msg == WM_CLOSE) {
-        DestroyWindow(hDlg);
-        return 0;
-    }
-    if (msg == WM_DESTROY) {
-        HWND hOwner = GetWindow(hDlg, GW_OWNER);
-        if (hOwner && IsWindow(hOwner))
-            PostMessage(hOwner, WM_APP_BRING_TO_TOP, 0, 0);
-        if (ctx) {
-            if (ctx->hGuiFont)   DeleteObject(ctx->hGuiFont);
-            if (ctx->hTitleFont) DeleteObject(ctx->hTitleFont);
-            delete ctx;
-            SetWindowLongPtrW(hDlg, GWLP_USERDATA, 0);
-        }
-        return 0;
-    }
-    if (msg == WM_COMMAND && LOWORD(wp) == IDOK) {
-        DestroyWindow(hDlg);
-        return 0;
-    }
-    return DefWindowProcW(hDlg, msg, wp, lp);
-}
 
 // WinMain
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {

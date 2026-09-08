@@ -44,6 +44,14 @@ set(SOURCES
     LyricParser.cpp
     LyricWindow.h
     LyricWindow.cpp
+    Settings.h
+    Settings.cpp
+    TrayIcon.h
+    TrayIcon.cpp
+    Dialogs.h
+    Dialogs.cpp
+    Hotkey.h
+    Hotkey.cpp
     app.rc
 )
 

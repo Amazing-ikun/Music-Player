@@ -44,6 +44,10 @@ set(SOURCES
     LyricParser.cpp
     LyricWindow.h
     LyricWindow.cpp
+    LyricsController.h
+    LyricsController.cpp
+    DurationCache.h
+    DurationCache.cpp
     Settings.h
     Settings.cpp
     TrayIcon.h
@@ -52,6 +56,8 @@ set(SOURCES
     Dialogs.cpp
     Hotkey.h
     Hotkey.cpp
+    TextFile.h
+    TextFile.cpp
     app.rc
 )
 

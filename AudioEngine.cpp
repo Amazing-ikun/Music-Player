@@ -1,4 +1,5 @@
 #include "AudioEngine.h"
+#include "TextFile.h"
 #include <cstring>
 #include <cmath>
 #include <cstdio>
@@ -14,38 +15,8 @@ static bool HasExtension(const std::wstring& path, const wchar_t* ext) {
     return e == ext;
 }
 
-// UTF-8 → UTF-16, fallback to system ANSI
-static std::wstring ToWide(const std::string& s) {
-    if (s.empty()) return L"";
-    int len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.c_str(), -1, NULL, 0);
-    if (len > 0) {
-        std::wstring ws(static_cast<size_t>(len) - 1, L'\0');
-        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &ws[0], len);
-        return ws;
-    }
-    len = MultiByteToWideChar(CP_ACP, 0, s.c_str(), -1, NULL, 0);
-    if (len <= 0) return L"";
-    std::wstring ws(static_cast<size_t>(len) - 1, L'\0');
-    MultiByteToWideChar(CP_ACP, 0, s.c_str(), -1, &ws[0], len);
-    return ws;
-}
-
-// UTF-16 → UTF-8
-static std::string ToUtf8(const std::wstring& ws) {
-    if (ws.empty()) return "";
-    int len = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, NULL, 0, NULL, NULL);
-    if (len <= 0) return "";
-    std::string s(static_cast<size_t>(len) - 1, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, &s[0], len, NULL, NULL);
-    return s;
-}
-
 static std::wstring ExeDir() {
-    wchar_t path[MAX_PATH];
-    GetModuleFileNameW(NULL, path, MAX_PATH);
-    wchar_t* last = wcsrchr(path, L'\\');
-    if (last) *last = L'\0';
-    return path;
+    return GetExeDirectory();
 }
 
 // ============================================
@@ -123,6 +94,77 @@ struct ID3Reader {
     }
 };
 
+// 解码 ID3v2 文本帧内容 (data[0] 为编码字节)
+static std::wstring DecodeId3Text(const char* data, DWORD size) {
+    if (size == 0) return L"";
+    BYTE enc = (BYTE)data[0];
+    const char* p = data + 1;
+    DWORD n = size - 1;
+    std::wstring out;
+
+    if (enc == 0x01 || enc == 0x02) {          // UTF-16: 01 带 BOM, 02 大端
+        bool be = (enc == 0x02);
+        if (enc == 0x01 && n >= 2) {
+            if ((BYTE)p[0] == 0xFF && (BYTE)p[1] == 0xFE) { be = false; p += 2; n -= 2; }
+            else if ((BYTE)p[0] == 0xFE && (BYTE)p[1] == 0xFF) { be = true; p += 2; n -= 2; }
+        }
+        out.resize(n / 2);
+        for (size_t i = 0; i < out.size(); ++i) {
+            BYTE a = (BYTE)p[i * 2], b = (BYTE)p[i * 2 + 1];
+            out[i] = be ? (wchar_t)((a << 8) | b) : (wchar_t)((b << 8) | a);
+        }
+        while (!out.empty() && out.back() == L'\0') out.pop_back();
+        return out;
+    }
+
+    // 单字节编码: 03 = UTF-8; 00 规范上是 ISO-8859-1, 但实际文件多为系统编码,
+    // 与 ID3v1 的处理保持一致按 ANSI 解
+    std::string s(p, n);
+    size_t nul = s.find('\0');
+    if (nul != std::string::npos) s.resize(nul);
+    if (s.empty()) return L"";
+    UINT cp = (enc == 0x03) ? CP_UTF8 : CP_ACP;
+    int len = MultiByteToWideChar(cp, 0, s.data(), (int)s.size(), NULL, 0);
+    if (len <= 0) return L"";
+    out.resize(len);
+    MultiByteToWideChar(cp, 0, s.data(), (int)s.size(), &out[0], len);
+    return out;
+}
+
+// 解析 ID3v2.3/2.4 标签块, 取标题(TIT2)与歌手(TPE1); 结果以 UTF-8 写回
+static void ParseId3v2(const char* tag, std::string& artist, std::string& title) {
+    if (!tag || memcmp(tag, "ID3", 3) != 0) return;
+    BYTE version = (BYTE)tag[3];
+    DWORD size = ((DWORD)(BYTE)tag[6] << 21) | ((DWORD)(BYTE)tag[7] << 14)
+               | ((DWORD)(BYTE)tag[8] << 7) | (BYTE)tag[9];
+    const char* p = tag + 10;
+    const char* end = p + size;
+
+    while (p + 10 <= end) {
+        if (p[0] == '\0') break;                       // 其后为填充
+        char id[5] = { p[0], p[1], p[2], p[3], '\0' };
+        DWORD fsz;
+        if (version >= 4)                              // v2.4: syncsafe
+            fsz = ((DWORD)(BYTE)p[4] << 21) | ((DWORD)(BYTE)p[5] << 14)
+                | ((DWORD)(BYTE)p[6] << 7) | (BYTE)p[7];
+        else                                           // v2.3: 大端
+            fsz = ((DWORD)(BYTE)p[4] << 24) | ((DWORD)(BYTE)p[5] << 16)
+                | ((DWORD)(BYTE)p[6] << 8) | (BYTE)p[7];
+        const char* data = p + 10;
+        if (fsz == 0 || data + fsz > end) break;
+
+        if (strcmp(id, "TIT2") == 0 || strcmp(id, "TPE1") == 0) {
+            std::wstring text = DecodeId3Text(data, fsz);
+            if (!text.empty()) {
+                std::string utf8 = WideToUtf8(text);
+                if (strcmp(id, "TIT2") == 0) title = utf8;
+                else                         artist = utf8;
+            }
+        }
+        p = data + fsz;
+    }
+}
+
 // 构造函数
 AudioEngine::AudioEngine()
     : m_stream(0)
@@ -138,6 +180,7 @@ AudioEngine::AudioEngine()
     , m_fadeMsg(0)
     , m_fading(false)
     , m_fadeSync(0)
+    , m_fadeDeadline(0)
     , m_error(AudioError::Success)
     , m_balanceEnabled(false)
     , m_songGain(1.0f)
@@ -152,6 +195,8 @@ AudioEngine::~AudioEngine() {
 
 // 初始化 BASS 音频引擎=
 bool AudioEngine::Initialize(HWND hwnd) {
+    // 让 BASS 跟随系统默认输出设备的变化 (合盖休眠、拔插耳机、接入扩展坞都可能切换默认设备)
+    BASS_SetConfig(BASS_CONFIG_DEV_DEFAULT, TRUE);
     // 使用默认音频设备，44.1kHz采样率
     if (!BASS_Init(-1, 44100, 0, hwnd, NULL)) {
         m_error = MapBassError(BASS_ErrorGetCode());
@@ -346,7 +391,7 @@ void AudioEngine::LoadLoudnessCache() {
                         e.size  = (ULONGLONG)strtoull(line.substr(t1 + 1, t2 - t1 - 1).c_str(), NULL, 10);
                         e.mtime.dwHighDateTime = (DWORD)strtoul(line.substr(t2 + 1, t3 - t2 - 1).c_str(), NULL, 10);
                         e.mtime.dwLowDateTime  = (DWORD)strtoul(line.substr(t3 + 1, t4 - t3 - 1).c_str(), NULL, 10);
-                        std::wstring path = ToWide(line.substr(t4 + 1));
+                        std::wstring path = Utf8ToWide(line.substr(t4 + 1));
                         if (!path.empty()) m_loudnessCache[path] = e;
                     }
                 }
@@ -373,7 +418,7 @@ void AudioEngine::SaveLoudnessCache() {
                 (unsigned long)kv.second.mtime.dwHighDateTime,
                 (unsigned long)kv.second.mtime.dwLowDateTime);
         all += tmp;
-        all += ToUtf8(kv.first);
+        all += WideToUtf8(kv.first);
         all += "\n";
     }
     DWORD written;
@@ -533,17 +578,17 @@ std::wstring AudioEngine::GetFormattedMetadata() const {
 
     std::string artist, title;
 
-    // --- 尝试 FLAC Vorbis Comments (UTF-8) ---
-    const char* meta = (const char*)BASS_ChannelGetTags(m_stream, BASS_TAG_META);
+    // --- FLAC / Ogg 的 Vorbis 注释 (UTF-8) ---
+    const char* meta = (const char*)BASS_ChannelGetTags(m_stream, BASS_TAG_OGG);
     if (meta && *meta) {
         while (*meta) {
             const char* eq = strchr(meta, '=');
             if (eq) {
                 std::string key(meta, eq - meta);
                 std::string val(eq + 1);
-                if (_stricmp(key.c_str(), "ARTIST") == 0) {
+                if (_stricmp(key.c_str(), "ARTIST") == 0 && artist.empty()) {
                     artist = val;
-                } else if (_stricmp(key.c_str(), "TITLE") == 0) {
+                } else if (_stricmp(key.c_str(), "TITLE") == 0 && title.empty()) {
                     title = val;
                 }
             }
@@ -551,18 +596,23 @@ std::wstring AudioEngine::GetFormattedMetadata() const {
         }
     }
 
-    // --- 尝试 ID3v1 (系统编码，中文环境下为 GBK) ---
-    if (artist.empty() && title.empty()) {
+    // --- ID3v2 (MP3): TIT2/TPE1 ---
+    if (artist.empty() || title.empty()) {
+        ParseId3v2((const char*)BASS_ChannelGetTags(m_stream, BASS_TAG_ID3V2), artist, title);
+    }
+
+    // --- ID3v1 兜底 (系统编码，中文环境下为 GBK) ---
+    if (artist.empty() || title.empty()) {
         auto r = ID3Reader::Read(m_stream);
         if (r.valid) {
-            artist = r.artist;
-            title = r.title;
+            if (artist.empty()) artist = r.artist;
+            if (title.empty())  title = r.title;
         }
     }
 
     // --- 编码转换：UTF-8/ANSI → UTF-16 ---
-    std::wstring wa = ToWide(artist);
-    std::wstring wt = ToWide(title);
+    std::wstring wa = Utf8OrAnsiToWide(artist);
+    std::wstring wt = Utf8OrAnsiToWide(title);
 
     if (!wa.empty() && !wt.empty()) return wa + L" - " + wt;
     if (!wt.empty())  return wt;
@@ -583,6 +633,8 @@ void AudioEngine::SetSpeed(double speed) {
 void AudioEngine::PauseFade(DWORD fadeMs) {
     if (!m_stream || !m_playing || m_fading) return;
     m_fading = true;
+    // 留 1 秒余量: 正常情况下滑动同步会先到; 超时说明回调丢失(休眠/设备丢失), 由兜底收尾
+    m_fadeDeadline = GetTickCount64() + fadeMs + 1000;
     if (m_fadeSync) BASS_ChannelRemoveSync(m_stream, m_fadeSync);
     m_fadeSync = BASS_ChannelSetSync(m_stream, BASS_SYNC_SLIDE, 0, FadeSyncProc, this);
     BASS_ChannelSlideAttribute(m_stream, BASS_ATTRIB_VOL, 0, fadeMs);
@@ -592,6 +644,7 @@ void AudioEngine::PlayFade() {
     if (!m_stream) return;
     if (m_fading) {
         m_fading = false;
+        m_fadeDeadline = 0;
         if (m_fadeSync) {
             BASS_ChannelRemoveSync(m_stream, m_fadeSync);
             m_fadeSync = 0;
@@ -640,12 +693,89 @@ void AudioEngine::OnFadeComplete() {
     if (!m_fading || !m_fadeSync) return; // 已被 PlayFade() 取消
     m_fading = false;
     m_fadeSync = 0;
+    m_fadeDeadline = 0;
     if (!m_stream) return;
     BASS_ChannelPause(m_stream);
     float vol = m_songGain;
     BASS_ChannelSetAttribute(m_stream, BASS_ATTRIB_VOL, vol);
     m_playing = false;
     m_paused = true;
+}
+
+// 以 BASS 的真实状态为准校正播放/暂停标志
+// m_playing/m_paused 只在应用主动调用 Play/Pause 等时才变, 与设备实际状态无关;
+// 设备丢失或休眠唤醒后二者可能永久脱节, 这里负责重新对账。
+bool AudioEngine::SyncStateFromBass() {
+    if (!m_stream) {
+        bool changed = m_playing || m_paused || m_fading;
+        m_playing = false;
+        m_paused = false;
+        m_fading = false;
+        m_fadeSync = 0;
+        return changed;
+    }
+    if (m_fading) return false;   // 淡出进行中, 最终状态由淡出回调决定
+
+    DWORD state = BASS_ChannelIsActive(m_stream);
+    if (state == BASS_ACTIVE_STOPPED && BASS_ErrorGetCode() == BASS_ERROR_HANDLE)
+        return false;             // 流已被 AUTOFREE 释放, 交给歌曲结束通知处理
+
+    bool playing = (state == BASS_ACTIVE_PLAYING);
+    bool paused  = (state == BASS_ACTIVE_PAUSED || state == BASS_ACTIVE_PAUSED_DEVICE);
+    if (playing == m_playing && paused == m_paused) return false;
+
+    m_playing = playing;
+    m_paused  = paused;
+    return true;
+}
+
+// 休眠唤醒后恢复输出
+bool AudioEngine::ResumeAfterSuspend() {
+    if (!m_stream) return false;
+
+    // 淡出若在休眠中被中断, BASS 的滑动同步回调不会再触发 → 按"暂停"的意图收尾,
+    // 否则 m_fading 会永久卡住, 播放/暂停判据也跟着失效。
+    if (m_fading) {
+        // 淡出若在休眠中被中断, BASS 的滑动同步回调不会再触发 → 按"暂停"的意图收尾,
+        // 否则 m_fading 会永久卡住, 播放/暂停判据也跟着失效。
+        FinishPendingPause();
+        return false;
+    }
+
+    if (BASS_ChannelIsActive(m_stream) == BASS_ACTIVE_PLAYING)
+        return true;   // 音频始终没断
+
+    // 应用以为在播, 但设备已被系统停掉 / 流被挂起 → 重新起播(会重新获取输出设备)
+    if (m_playing && BASS_ChannelPlay(m_stream, FALSE)) {
+        m_paused = false;
+        return true;
+    }
+
+    SyncStateFromBass();   // 恢复失败: 如实反映现状, 避免继续谎报"正在播放"
+    return m_playing;
+}
+
+// 结束进行中的暂停淡出: 取消同步器, 立即暂停并还原音量, 并把状态定死为"已暂停"
+bool AudioEngine::FinishPendingPause() {
+    if (!m_fading) return false;
+    m_fading = false;
+    m_fadeDeadline = 0;
+    if (m_fadeSync) {
+        if (m_stream) BASS_ChannelRemoveSync(m_stream, m_fadeSync);
+        m_fadeSync = 0;
+    }
+    if (m_stream) {
+        BASS_ChannelPause(m_stream);
+        BASS_ChannelSetAttribute(m_stream, BASS_ATTRIB_VOL, m_songGain);
+    }
+    m_playing = false;
+    m_paused = true;
+    return true;
+}
+
+// 暂停淡出是否已超过预期耗时仍未完成
+bool AudioEngine::IsFadeStuck() const {
+    return m_fading && m_fadeDeadline != 0 && GetTickCount64() >= m_fadeDeadline;
 }
 
 AudioError AudioEngine::MapBassError(int bassCode) {

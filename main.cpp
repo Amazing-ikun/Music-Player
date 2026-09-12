@@ -3,12 +3,23 @@
 #define _UNICODE
 #include <windows.h>
 #include <commctrl.h>
+#include <windowsx.h>   // GET_X_LPARAM / GET_Y_LPARAM
 
 // MusicPlayer version
-static const wchar_t* APP_VERSION = L"2.0.1";
+static const wchar_t* APP_VERSION = L"2.0.2";
 
 // Changelog — shown in the About dialog
 static const wchar_t* CHANGELOG =
+    L"v2.0.2\r\n"
+    L"  - 重构: 桌面歌词编排抽成 LyricsController(歌词解析/悬浮窗/映射表集中管理), 悬浮窗 6 个回调合并为 LyricWindowListener 接口, 歌曲时长缓存抽成 DurationCache, 新增共用的 TextFile 文本读写模块(消除 4 处重复的编码转换), main.cpp 再精简约 500 行\r\n"
+    L"  - 统一: .playlist.txt/.lastsong.txt/.lastfolder.txt/.playcount.txt/.lyrics_map.txt/.history.txt 落盘编码统一为 UTF-8 (读取时自动识别旧的 UTF-16, 旧文件仍可正常加载)\r\n"
+    L"  - 优化: 进度条点击轨道任意位置立即跳转并播放 (原为固定翻页, 每次只移动全曲的 5%)\r\n"
+    L"  - 修复: 休眠唤醒后托盘提示冻结, 换歌/暂停都不再刷新 (根因: 唤醒瞬间一次 NIM_MODIFY 瞬时失败后只再尝试 NIM_ADD, 而 shell 中的图标仍在, NIM_ADD 始终失败。改为始终先试 NIM_MODIFY, 失败才先 NIM_DELETE 清理残留再重加)\r\n"
+    L"  - 修复: 休眠唤醒后播放状态与界面/托盘脱节 (新增与 BASS 真实状态的周期性对账; 唤醒时重新对账并在设备被系统停掉时尝试恢复输出; 另收尾被休眠打断的暂停淡出, 避免永久卡在\"正在播放\")\r\n"
+    L"  - 修复: 暂停淡出结束、歌单播放完毕、移除当前歌曲、打开空文件夹后托盘提示不同步\r\n"
+    L"  - 修复: MP3 显示成歌手名而非\"歌手 - 标题\" (根因: 只读 ID3v1 且该标签标题字段可能为空; 新增 ID3v2 TIT2/TPE1 解析, 支持 UTF-8/UTF-16/ANSI 文本帧)\r\n"
+    L"  - 修复: FLAC/Ogg 标签读取用错 BASS 常量 (BASS_TAG_META 实为网络流 ICY 元数据), 改用 BASS_TAG_OGG\r\n"
+    L"\r\n"
     L"v2.0.1\r\n"
     L"  - 重构: 代码架构优化(高内聚低耦合), 从主窗口拆出 Settings(设置持久化)/TrayIcon(托盘图标)/Dialogs(全部对话框)/Hotkey(热键类型) 四个模块, 消除对话框对主窗口的反向依赖, main.cpp 由 4490 行精简至约 2900 行\r\n"
     L"\r\n"
@@ -108,11 +119,13 @@ static const wchar_t* CHANGELOG =
 #include "AudioEngine.h"
 #include "PlaylistManager.h"
 #include "ListeningHistory.h"
-#include "LyricWindow.h"
+#include "LyricsController.h"
+#include "DurationCache.h"
 #include "Settings.h"
 #include "TrayIcon.h"
 #include "Dialogs.h"
 #include "Hotkey.h"
+#include "TextFile.h"
 #include <chrono>
 
 namespace {
@@ -141,24 +154,6 @@ static std::wstring FormatDuration(double seconds) {
     return FormatTime(seconds);
 }
 
-static std::string WideToUtf8(const std::wstring& ws) {
-    if (ws.empty()) return {};
-    int n = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), (int)ws.size(), NULL, 0, NULL, NULL);
-    if (n <= 0) return {};
-    std::string out(n, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), (int)ws.size(), &out[0], n, NULL, NULL);
-    return out;
-}
-
-static std::wstring Utf8ToWide(const std::string& s) {
-    if (s.empty()) return L"";
-    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, NULL, 0);
-    if (len <= 0) return L"";
-    std::wstring ws(len - 1, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &ws[0], len);
-    return ws;
-}
-
 static std::wstring GetDisplayName(const std::wstring& path) {
     size_t pos = path.rfind(L'\\');
     if (pos == std::wstring::npos) pos = path.rfind(L'/');
@@ -171,32 +166,6 @@ static std::wstring GetDisplayName(const std::wstring& path) {
             file = file.substr(0, dot);
     }
     return file;
-}
-
-// 取文件名 (去目录、去任意扩展名)
-static std::wstring BaseNameNoExt(const std::wstring& path) {
-    size_t slash = path.find_last_of(L"\\/");
-    std::wstring file = (slash == std::wstring::npos) ? path : path.substr(slash + 1);
-    size_t dot = file.rfind(L'.');
-    if (dot != std::wstring::npos) file = file.substr(0, dot);
-    return file;
-}
-
-// 忽略大小写, 只要一方文件名包含另一方即视为「匹配」(不弹确认)
-static bool NamesDifferTooMuch(const std::wstring& song, const std::wstring& lrc) {
-    std::wstring a = song, b = lrc;
-    for (auto& c : a) c = towlower(c);
-    for (auto& c : b) c = towlower(c);
-    if (a.empty() || b.empty()) return false;
-    return (a.find(b) == std::wstring::npos && b.find(a) == std::wstring::npos);
-}
-
-static std::wstring GetExeDirectory() {
-    wchar_t path[MAX_PATH];
-    GetModuleFileNameW(NULL, path, MAX_PATH);
-    wchar_t* last = wcsrchr(path, L'\\');
-    if (last) *last = L'\0';
-    return path;
 }
 
 static void WriteLog(const wchar_t* format, ...) {
@@ -264,13 +233,6 @@ static bool SearchMatchesText(const std::wstring& query,
     };
     return contains(title) || contains(artist) || contains(album);
 }
-
-// 时长缓存条目: 记录文件大小与修改时间用于缓存失效判断
-struct DurationCacheEntry {
-    double    duration;   // 秒
-    ULONGLONG size;
-    FILETIME  mtime;
-};
 
 // MainWindow
 class MainWindow {
@@ -374,9 +336,7 @@ private:
     bool m_trayReaddActive;   // 重试定时器当前是否在运行
 
     // ---- Desktop lyrics ----
-    LyricParser m_lyrics;
-    LyricWindow m_lyricWindow;
-    std::map<std::wstring, std::wstring> m_lyricsMap;  // 歌曲路径 → lrc 路径
+    LyricsController m_lyricsCtl;
 
     // ---- Hotkeys ----
     HotkeyBinding m_hotkeys[7];
@@ -400,8 +360,7 @@ private:
     std::map<std::wstring, int> m_playCount;
 
     // ---- Duration cache & progressive scan ----
-    std::map<std::wstring, DurationCacheEntry> m_durationCache;
-    bool m_durationCacheLoaded = false;
+    DurationCache m_durationCache;
     std::vector<int> m_pendingDurationScan;  // playlist indexes to scan (unknown durations, or all during full rescan)
     bool m_fullDurationScan = false;         // 全量重扫进行中 (用于防重复执行)
 
@@ -426,6 +385,58 @@ private:
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
 
+    // 进度条子类过程: 点击轨道(非滑块)时立即跳到点击处, 而非默认的翻页行为;
+    // 点在滑块上则交回默认处理, 保证拖拽功能不变。
+    static LRESULT CALLBACK SeekTrackProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                          UINT_PTR id, DWORD_PTR refData) {
+        if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK) {
+            POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            RECT thumb = {};
+            SendMessageW(hwnd, TBM_GETTHUMBRECT, 0, (LPARAM)&thumb);
+            if (!PtInRect(&thumb, pt)) {
+                // 未抓滑块: 把点击横坐标换算成位置
+                int min = (int)SendMessageW(hwnd, TBM_GETRANGEMIN, 0, 0);
+                int max = (int)SendMessageW(hwnd, TBM_GETRANGEMAX, 0, 0);
+                int cur = (int)SendMessageW(hwnd, TBM_GETPOS, 0, 0);
+
+                // 实测滑块中心在两端的位置, 免去对轨道/滑块几何的假设
+                RECT t = {};
+                SendMessageW(hwnd, TBM_SETPOS, FALSE, min);
+                SendMessageW(hwnd, TBM_GETTHUMBRECT, 0, (LPARAM)&t);
+                int leftCenter = (t.left + t.right) / 2;
+                SendMessageW(hwnd, TBM_SETPOS, FALSE, max);
+                SendMessageW(hwnd, TBM_GETTHUMBRECT, 0, (LPARAM)&t);
+                int rightCenter = (t.left + t.right) / 2;
+                SendMessageW(hwnd, TBM_SETPOS, FALSE, cur);   // 还原
+                if (rightCenter <= leftCenter) {              // 兜底: 退回轨道矩形
+                    RECT ch = {};
+                    SendMessageW(hwnd, TBM_GETCHANNELRECT, 0, (LPARAM)&ch);
+                    leftCenter = ch.left;
+                    rightCenter = ch.right;
+                }
+
+                int pos = cur;
+                if (rightCenter > leftCenter) {
+                    double ratio = (double)(pt.x - leftCenter) / (rightCenter - leftCenter);
+                    if (ratio < 0.0) ratio = 0.0;
+                    if (ratio > 1.0) ratio = 1.0;
+                    pos = min + (int)(ratio * (max - min) + 0.5);
+                }
+                SendMessageW(hwnd, TBM_SETPOS, TRUE, pos);
+
+                MainWindow* self = (MainWindow*)refData;
+                if (self) {   // 复用 WM_HSCROLL 的跳转逻辑
+                    self->OnHScroll(MAKEWPARAM(TB_THUMBPOSITION, 0), (LPARAM)hwnd);
+                }
+                SetFocus(hwnd);
+                return 0;   // 吞掉默认翻页/捕获处理
+            }
+        } else if (msg == WM_NCDESTROY) {
+            RemoveWindowSubclass(hwnd, &MainWindow::SeekTrackProc, id);
+        }
+        return DefSubclassProc(hwnd, msg, wp, lp);
+    }
+
     LRESULT HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
         if (msg == WM_KEYDOWN) {
             if (HandleAccelerator((int)wp)) return 0;
@@ -448,13 +459,22 @@ private:
             case WM_HOTKEY:            OnGlobalHotkey((int)wp);     return 0;
             case WM_POWERBROADCAST:
                 // 合盖休眠时结束当前计时段, 避免休眠期间被计入听歌时长;
-                // 唤醒后若音频仍在播放则重新开始计时
+                // 唤醒后设备可能已被系统停掉, 需重新对账并在必要时恢复输出,
+                // 再把界面/托盘刷成真实状态 (否则会一直显示休眠前的歌曲信息)
                 if (wp == PBT_APMSUSPEND) {
+                    // 若此刻正在暂停淡出, 休眠会让滑动同步回调永不触发: 先按"暂停"收尾,
+                    // 把状态定死在休眠之前, 免得醒来后卡在"正在播放"
+                    m_audio.FinishPendingPause();
                     StopListening();
                     m_history.Save(GetExeDirectory() + L"\\.history.txt");
                 } else if (wp == PBT_APMRESUMESUSPEND || wp == PBT_APMRESUMEAUTOMATIC) {
+                    m_audio.ResumeAfterSuspend();
                     if (m_audio.IsPlaying())
                         StartListening();
+                    UpdateUI();
+                    UpdateTrayTip();
+                    Log(L"唤醒: playing=%d paused=%d loaded=%d",
+                        (int)m_audio.IsPlaying(), (int)m_audio.IsPaused(), (int)m_audio.IsLoaded());
                 }
                 return TRUE;
             case WM_NOTIFY:            return OnNotify(wp, lp);
@@ -548,12 +568,30 @@ private:
         m_history.Load(GetExeDirectory() + L"\\.history.txt");
         m_audio.SetNotifyWindow(m_hwnd, WM_USER_SONG_END);
         m_audio.SetFadeNotify(m_hwnd, WM_APP_FADE_DONE);
-        LoadLyricsMap();
+        LyricsHost lyricsHost;
+        lyricsHost.hInst = m_hInst;
+        lyricsHost.owner = m_hwnd;
+        lyricsHost.currentSongPath = [this]() -> std::wstring {
+            if (m_currentIndex >= 0 && m_currentIndex < m_playlist.GetCount())
+                return m_playlist.GetFile(m_currentIndex);
+            return L"";
+        };
+        lyricsHost.playbackPosition = [this]() { return m_audio.GetPosition(); };
+        lyricsHost.navigate = [this](bool next) { if (next) OnNext(); else OnPrev(); };
+        lyricsHost.persistSettings = [this]() { SaveSettings(); };
+        lyricsHost.visibilityChanged = [this]() { UpdateLyricButton(); UpdateSettingsMenu(); };
+        lyricsHost.songCount = [this]() { return m_playlist.GetCount(); };
+        lyricsHost.songPathAt = [this](int i) -> std::wstring {
+            if (i < 0 || i >= m_playlist.GetCount()) return L"";
+            return m_playlist.GetFile(i);
+        };
+        m_lyricsCtl.Init(&m_settings, lyricsHost);
+        m_lyricsCtl.LoadMap();
 
         bool startPlay = (m_settings.autoplay == 1);
         if (m_settings.rememberProgress && !m_playlist.IsEmpty()) {
             if (LoadLastSong()) {
-                LoadLyricsForCurrentSong();
+                m_lyricsCtl.LoadForCurrentSong();
                 if (m_audio.IsBalanceEnabled()) {
                     m_audio.ApplyBalance();
                 }
@@ -598,36 +636,10 @@ private:
         RegisterHotKeys();
         AddTrayIcon();
         SetTimer(m_hwnd, TIMER_ID_TRAY_WATCHDOG, 5000, NULL);  // 周期性心跳, 兜底恢复托盘图标
-        // 桌面歌词: 设置右键隐藏回调, 同步按钮状态, 并按上次状态恢复显示
-        m_lyricWindow.SetHideCallback([this]() { SetLyricsVisible(false); });
-        m_lyricWindow.SetFontSizeChangedCallback([this](int fs) {
-            m_settings.lyricsFontSize = fs;
-            SaveSettings();
-        });
-        m_lyricWindow.SetSecondFontSizeChangedCallback([this](int fs) {
-            m_settings.lyricsSecondFontSize = fs;
-            SaveSettings();
-        });
-        m_lyricWindow.SetPrevNextCallback([this](bool next) {
-            if (next) OnNext(); else OnPrev();
-        });
-        m_lyricWindow.SetLockedChangedCallback([this](bool locked) {
-            m_settings.lyricsLocked = locked;
-            SaveSettings();
-        });
-        m_lyricWindow.SetTranslationChangedCallback([this](bool show) {
-            m_settings.lyricsTranslation = show;
-            SaveSettings();
-        });
-        m_lyricWindow.SetLocked(m_settings.lyricsLocked);
-        m_lyricWindow.SetShowTranslation(m_settings.lyricsTranslation);
-        m_lyricWindow.SetColor(m_settings.lyricsColor);
-        m_lyricWindow.SetNextColor(m_settings.lyricsNextColor);
-        m_lyricWindow.SetFontSize(m_settings.lyricsFontSize);
-        m_lyricWindow.SetSecondFontSize(m_settings.lyricsSecondFontSize);
+        // 桌面歌词: 同步按钮状态, 并按上次状态恢复显示
         UpdateLyricButton();
         if (m_settings.lyricsShow) {
-            ShowLyricWindow();
+            m_lyricsCtl.SetVisible(true);
         }
         UpdateUI();
     }
@@ -650,7 +662,7 @@ private:
         SaveSettings();
         UnregisterHotKeys();
         RemoveTrayIcon();
-        m_lyricWindow.Destroy();
+        m_lyricsCtl.Destroy();
         m_audio.Cleanup();
         DestroyWindow(m_hwnd);
     }
@@ -799,6 +811,8 @@ private:
         SendMessageW(m_trackSeek, TBM_SETRANGE, TRUE, MAKELPARAM(0, SEEK_RES));
         SendMessageW(m_trackSeek, TBM_SETPOS, TRUE, 0);
         SendMessageW(m_trackSeek, TBM_SETPAGESIZE, 0, SEEK_RES / 20);
+        // 让点击轨道立即跳转 (默认是翻页), 见 SeekTrackProc
+        SetWindowSubclass(m_trackSeek, &MainWindow::SeekTrackProc, IDC_TRACK_SEEK, (DWORD_PTR)this);
 
         m_staticTime = CreateWindowExW(0, L"STATIC", L"00:00 / 00:00",
             WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
@@ -918,7 +932,7 @@ private:
             switch (id) {
                 case ID_FILE_OPENFOLDER:      OpenFolder(); break;
                 case ID_FILE_ADDFILES:        AddFiles();   break;
-                case ID_FILE_MATCH_LYRICS:    MatchLyricsForAll(); break;
+                case ID_FILE_MATCH_LYRICS:    m_lyricsCtl.MatchAll(); break;
                 case ID_FILE_EXPORT_PLAYLIST: ExportPlaylist(); break;
                 case ID_UNDO_REMOVE:          UndoRemove();     break;
                 case ID_FILE_EXIT:            OnRealClose(); break;
@@ -947,10 +961,10 @@ private:
                     SaveSettings();
                     break;
                 case ID_SETTINGS_LYRICS:
-                    SetLyricsVisible(!m_settings.lyricsShow);
+                    m_lyricsCtl.SetVisible(!m_settings.lyricsShow);
                     break;
                 case ID_SETTINGS_LYRICS_OPTIONS:
-                    ShowLyricsSettingsDialog();
+                    m_lyricsCtl.ShowSettingsDialog();
                     break;
                 case ID_SETTINGS_HOTKEYS:
                     ShowHotkeyDialog();
@@ -1003,7 +1017,7 @@ private:
                 else if (hCtrl == m_btnMode) OnCycleMode();
                 else if (hCtrl == m_btnLocate) LocateCurrentSong();
                 else if (hCtrl == m_btnMute) ToggleMute();
-                else if (hCtrl == m_btnLyrics) SetLyricsVisible(SendMessageW(m_btnLyrics, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                else if (hCtrl == m_btnLyrics) m_lyricsCtl.SetVisible(SendMessageW(m_btnLyrics, BM_GETCHECK, 0, 0) == BST_CHECKED);
             } else if (code == EN_CHANGE && hCtrl == m_searchEdit) {
                 OnSearchChanged();
             }
@@ -1139,7 +1153,7 @@ private:
                                 ShellExecuteW(NULL, L"open", L"explorer.exe", param.c_str(), NULL, SW_SHOWNORMAL);
                                 break;
                             }
-                            case 3106: MatchLyricsForSong(songIdx); break;
+                            case 3106: m_lyricsCtl.MatchForSong(songIdx); break;
                             case 3104: {
                                 if (m_nextScheduled == songIdx)
                                     m_nextScheduled = -1;
@@ -1166,6 +1180,7 @@ private:
                                 UpdatePlaylistSelection();
                                 UpdateUI();
                                 UpdateUndoMenuState();
+                                UpdateTrayTip();  // 若移除的正是当前歌曲, 托盘需同步清掉
                                 break;
                             }
                             case 3105: {
@@ -1251,8 +1266,20 @@ private:
         if (m_audio.IsLoaded() && !m_userDraggingSeek) {
             UpdateSeekDisplay();
             UpdateTimeDisplay();
-            if (m_lyricWindow.Visible()) {
-                m_lyricWindow.SetCurrentIndex(m_lyrics.FindIndex(m_audio.GetPosition()));
+            m_lyricsCtl.Tick();
+            // 兜底: 暂停淡出的同步回调若丢失(休眠/设备丢失), 到点主动收尾, 否则会一直卡在"正在播放"
+            if (m_audio.IsFadeStuck()) {
+                Log(L"暂停淡出超时未完成, 主动收尾为已暂停");
+                m_audio.FinishPendingPause();
+                StopListening();
+                UpdateUI();
+                UpdateTrayTip();
+            }
+            // 兜底对账: 设备丢失/休眠等导致播放状态与 BASS 脱节时, 半秒内自愈并刷新界面与托盘
+            if (m_audio.SyncStateFromBass()) {
+                if (m_audio.IsPlaying()) StartListening(); else StopListening();
+                UpdateUI();
+                UpdateTrayTip();
             }
             if (++m_saveTick >= 20) {
                 m_saveTick = 0;
@@ -1325,6 +1352,7 @@ private:
             SendMessageW(m_trackSeek, TBM_SETPOS, TRUE, 0);
             EnableWindow(m_trackSeek, FALSE);
             UpdateUI();
+            UpdateTrayTip();  // 否则托盘会一直挂着刚放完的那首歌
         }
     }
 
@@ -1361,6 +1389,7 @@ private:
             } else {
                 SetWindowTextW(m_staticSong, L"所选文件夹中没有找到音频文件 (MP3/FLAC/WAV)");
                 UpdateUI();
+                UpdateTrayTip();  // 已卸载上一首, 托盘不能继续显示它
             }
         }
         CoTaskMemFree(pidl);
@@ -1532,9 +1561,10 @@ private:
     void OnPlayPause() {
         if (!m_audio.IsLoaded()) return;
         if (m_audio.IsPlaying() && !m_audio.IsFading()) {
+            // 此刻只是开始淡出, 播放状态尚未改变, 托盘留到 OnFadeDone() 里再刷,
+            // 否则会先显示"正在播放"、与窗口里的"已暂停"自相矛盾
             m_audio.PauseFade(500);
             SetWindowTextW(m_staticSong, L"已暂停");
-            UpdateTrayTip();
         } else {
             m_audio.PlayFade();
             StartListening();
@@ -1593,6 +1623,7 @@ private:
         m_audio.OnFadeComplete();
         StopListening();
         UpdateUI();
+        UpdateTrayTip();   // 暂停状态到这一刻才真正生效, 此时刷新托盘才是正确的
     }
 
     void SetPlayMode(PlayMode mode) {
@@ -1871,7 +1902,7 @@ private:
         }
 
         m_currentIndex = index;
-        LoadLyricsForCurrentSong();
+        m_lyricsCtl.LoadForCurrentSong();
         if (m_audio.IsBalanceEnabled()) {
             m_audio.ApplyBalance();   // 首次播放该歌曲时测量响度, 之后命中缓存
         }
@@ -1894,7 +1925,7 @@ private:
         m_playlist.UpdateMetadata(index, artist, title, L"", len);
         // 播放已知时长, 写入缓存供下次启动直接恢复
         if (len > 0)
-            WriteDurationCache(path, len);
+            m_durationCache.Put(path, len);
         // Find display index for this playlist index
         for (int di = 0; di < (int)m_filterMap.size(); di++) {
             if (m_filterMap[di] == index) { UpdateLVItem(di); break; }
@@ -2065,108 +2096,13 @@ private:
 
     // ---- Duration cache (.durations.txt) & progressive scan ----
 
-    // 从 .durations.txt 加载时长缓存 (格式同 .loudness.txt)
-    void LoadDurationCache() {
-        m_durationCache.clear();
-        std::wstring filePath = GetExeDirectory() + L"\\.durations.txt";
-        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ,
-            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE) return;
-
-        DWORD size = GetFileSize(hFile, NULL);
-        if (size > 0 && size < 16 * 1024 * 1024) {
-            std::vector<char> buf(size + 1, 0);
-            DWORD read;
-            if (ReadFile(hFile, buf.data(), size, &read, NULL)) {
-                char* p = buf.data();
-                while (*p) {
-                    char* nl = strchr(p, '\n');
-                    if (!nl) nl = p + strlen(p);
-                    *nl = '\0';
-                    if (*p && *p != '\r') {
-                        // 格式: duration<tab>size<tab>timeHigh<tab>timeLow<tab>path(UTF-8)
-                        std::string line(p);
-                        size_t t1 = line.find('\t');
-                        size_t t2 = line.find('\t', t1 + 1);
-                        size_t t3 = line.find('\t', t2 + 1);
-                        size_t t4 = line.find('\t', t3 + 1);
-                        if (t4 != std::string::npos) {
-                            DurationCacheEntry e;
-                            e.duration = atof(line.substr(0, t1).c_str());
-                            e.size  = (ULONGLONG)strtoull(line.substr(t1 + 1, t2 - t1 - 1).c_str(), NULL, 10);
-                            e.mtime.dwHighDateTime = (DWORD)strtoul(line.substr(t2 + 1, t3 - t2 - 1).c_str(), NULL, 10);
-                            e.mtime.dwLowDateTime  = (DWORD)strtoul(line.substr(t3 + 1, t4 - t3 - 1).c_str(), NULL, 10);
-                            std::wstring path = Utf8ToWide(line.substr(t4 + 1));
-                            if (!path.empty()) m_durationCache[path] = e;
-                        }
-                    }
-                    p = nl + 1;
-                }
-            }
-        }
-        CloseHandle(hFile);
-    }
-
-    // 写回整个 .durations.txt 缓存
-    void SaveDurationCache() {
-        std::wstring filePath = GetExeDirectory() + L"\\.durations.txt";
-        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
-            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE) return;
-
-        std::string all;
-        all.reserve(m_durationCache.size() * 128);
-        char tmp[128];
-        for (const auto& kv : m_durationCache) {
-            sprintf(tmp, "%.2f\t%llu\t%lu\t%lu\t", kv.second.duration,
-                    (unsigned long long)kv.second.size,
-                    (unsigned long)kv.second.mtime.dwHighDateTime,
-                    (unsigned long)kv.second.mtime.dwLowDateTime);
-            all += tmp;
-            all += WideToUtf8(kv.first);
-            all += "\n";
-        }
-        DWORD written;
-        WriteFile(hFile, all.data(), (DWORD)all.size(), &written, NULL);
-        CloseHandle(hFile);
-    }
-
-    // 将一次探测/播放得到的时长写入缓存 (带文件大小+修改时间做失效判断)
-    void WriteDurationCache(const std::wstring& path, double duration) {
-        if (!m_durationCacheLoaded) {
-            LoadDurationCache();
-            m_durationCacheLoaded = true;
-        }
-        WIN32_FILE_ATTRIBUTE_DATA fad;
-        if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad)) return;
-        DurationCacheEntry e;
-        e.duration = duration;
-        e.size = ((ULONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
-        e.mtime = fad.ftLastWriteTime;
-        m_durationCache[path] = e;
-        SaveDurationCache();
-    }
-
     // 歌单中时长未知且缓存命中(文件未变)的歌曲, 直接恢复缓存时长
     void ApplyDurationCache() {
-        if (!m_durationCacheLoaded) {
-            LoadDurationCache();
-            m_durationCacheLoaded = true;
-        }
         for (int i = 0; i < m_playlist.GetCount(); i++) {
             auto& song = m_playlist.GetSongs()[i];
             if (song.duration > 0) continue;
-            auto it = m_durationCache.find(song.filePath);
-            if (it == m_durationCache.end()) continue;
-
-            WIN32_FILE_ATTRIBUTE_DATA fad;
-            if (!GetFileAttributesExW(song.filePath.c_str(), GetFileExInfoStandard, &fad)) continue;
-            ULONGLONG sz = ((ULONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
-            if (it->second.size == sz &&
-                it->second.mtime.dwHighDateTime == fad.ftLastWriteTime.dwHighDateTime &&
-                it->second.mtime.dwLowDateTime == fad.ftLastWriteTime.dwLowDateTime) {
-                song.duration = it->second.duration;
-            }
+            double cached = m_durationCache.Get(song.filePath);
+            if (cached > 0) song.duration = cached;
         }
     }
 
@@ -2188,10 +2124,6 @@ private:
         if (m_fullDurationScan) {
             MessageBoxW(m_hwnd, L"正在统计歌曲时长，请稍候", L"提示", MB_OK | MB_ICONINFORMATION);
             return;
-        }
-        if (!m_durationCacheLoaded) {
-            LoadDurationCache();
-            m_durationCacheLoaded = true;
         }
         m_pendingDurationScan.clear();
         for (int i = 0; i < m_playlist.GetCount(); i++)
@@ -2227,20 +2159,13 @@ private:
         bool needProbe = true;
 
         if (m_fullDurationScan) {
-            // 文件信息与缓存一致且已有有效时长 → 跳过, 不重复探测
-            WIN32_FILE_ATTRIBUTE_DATA fad;
-            if (GetFileAttributesExW(song.filePath.c_str(), GetFileExInfoStandard, &fad)) {
-                ULONGLONG sz = ((ULONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
-                auto it = m_durationCache.find(song.filePath);
-                if (it != m_durationCache.end() && it->second.duration > 0 &&
-                    it->second.size == sz &&
-                    it->second.mtime.dwHighDateTime == fad.ftLastWriteTime.dwHighDateTime &&
-                    it->second.mtime.dwLowDateTime == fad.ftLastWriteTime.dwLowDateTime) {
-                    needProbe = false;
-                    if (song.duration <= 0) {
-                        song.duration = it->second.duration;
-                        UpdateLVItemForPlaylistIndex(idx);
-                    }
+            // 文件未变且缓存已有有效时长 → 跳过, 不重复探测
+            double cached = m_durationCache.Get(song.filePath);
+            if (cached > 0) {
+                needProbe = false;
+                if (song.duration <= 0) {
+                    song.duration = cached;
+                    UpdateLVItemForPlaylistIndex(idx);
                 }
             }
         } else if (song.duration > 0) {
@@ -2251,7 +2176,7 @@ private:
             double dur = AudioEngine::ProbeDuration(song.filePath);
             if (dur > 0) {
                 song.duration = dur;
-                WriteDurationCache(song.filePath, dur);
+                m_durationCache.Put(song.filePath, dur);
                 UpdateLVItemForPlaylistIndex(idx);
             }
         }
@@ -2350,163 +2275,12 @@ private:
 
     // Desktop lyrics
 
-    // 切歌时加载当前歌曲的 .lrc 歌词并刷新悬浮窗
-    void LoadLyricsForCurrentSong() {
-        m_lyrics.Clear();
-        std::wstring emptyText = L"暂无歌词";
-        if (m_currentIndex >= 0 && m_currentIndex < m_playlist.GetCount()) {
-            const std::wstring& songPath = m_playlist.GetFile(m_currentIndex);
-            auto it = m_lyricsMap.find(songPath);
-            if (it != m_lyricsMap.end() && !it->second.empty()) {
-                // 有显式映射: 校验文件是否存在; 失效则不回退, 显示「未找到歌词」
-                if (GetFileAttributesW(it->second.c_str()) != INVALID_FILE_ATTRIBUTES)
-                    m_lyrics.LoadFile(it->second);
-                else
-                    emptyText = L"未找到歌词/无效的歌词";
-            } else {
-                // 无映射: 同目录同名兜底
-                std::wstring lrc = FindLrcFile(songPath);
-                if (!lrc.empty()) m_lyrics.LoadFile(lrc);
-            }
-        }
-        m_lyricWindow.SetEmptyText(emptyText);
-        m_lyricWindow.SetLyrics(m_lyrics);
-        m_lyricWindow.SetCurrentIndex(m_lyrics.FindIndex(m_audio.GetPosition()));
-    }
-
-    // 显示桌面歌词悬浮窗 (首次时创建)
-    void ShowLyricWindow() {
-        if (!m_lyricWindow.Hwnd() && !m_lyricWindow.Create(m_hInst)) return;
-        m_lyricWindow.SetLyrics(m_lyrics);
-        m_lyricWindow.SetCurrentIndex(m_lyrics.FindIndex(m_audio.GetPosition()));
-        m_lyricWindow.Show();
-    }
-
     // 同步「词」按钮勾选状态
     void UpdateLyricButton() {
         if (m_btnLyrics) {
             SendMessageW(m_btnLyrics, BM_SETCHECK, m_settings.lyricsShow ? BST_CHECKED : BST_UNCHECKED, 0);
             InvalidateRect(m_btnLyrics, NULL, TRUE);
         }
-    }
-
-    // 统一设置桌面歌词显示状态 (按钮/菜单/托盘/右键共用)
-    void SetLyricsVisible(bool on) {
-        m_settings.lyricsShow = on;
-        if (on) ShowLyricWindow();
-        else m_lyricWindow.Hide();
-        UpdateLyricButton();
-        UpdateSettingsMenu();
-    }
-
-    // 扫描报告: 统计歌单里有多少首能在同目录找到同名 .lrc (不写映射表, 播放时实时兜底)
-    void MatchLyricsForAll() {
-        int found = 0;
-        for (int i = 0; i < m_playlist.GetCount(); ++i) {
-            if (!FindLrcFile(m_playlist.GetFile(i)).empty()) found++;
-        }
-        MessageBoxW(m_hwnd,
-            (L"共 " + std::to_wstring(m_playlist.GetCount()) + L" 首歌曲，其中 "
-             + std::to_wstring(found) + L" 首能在同目录找到同名歌词。").c_str(),
-            L"匹配歌词", MB_OK | MB_ICONINFORMATION);
-    }
-
-    // 手动为单首歌曲选择 .lrc
-    void MatchLyricsForSong(int songIdx) {
-        if (songIdx < 0 || songIdx >= m_playlist.GetCount()) return;
-        const std::wstring& songPath = m_playlist.GetFile(songIdx);
-
-        wchar_t file[1024] = {};
-        OPENFILENAMEW ofn = {};
-        ofn.lStructSize = sizeof(ofn);
-        ofn.hwndOwner = m_hwnd;
-        ofn.lpstrFilter = L"歌词文件 (*.lrc)\0*.lrc\0所有文件 (*.*)\0*.*\0";
-        ofn.lpstrFile = file;
-        ofn.nMaxFile = 1024;
-        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-        ofn.lpstrTitle = L"选择歌词文件";
-        if (!GetOpenFileNameW(&ofn)) return;  // 用户取消
-
-        std::wstring lrcPath = file;
-
-        if (NamesDifferTooMuch(BaseNameNoExt(songPath), BaseNameNoExt(lrcPath))) {
-            int r = MessageBoxW(m_hwnd,
-                L"您选择的歌词文件名与歌曲名似乎不匹配，要继续吗？",
-                L"匹配歌词", MB_YESNO | MB_ICONQUESTION);
-            if (r != IDYES) return;
-        }
-
-        m_lyricsMap[songPath] = lrcPath;
-        SaveLyricsMap();
-        if (m_currentIndex == songIdx) LoadLyricsForCurrentSong();
-        MessageBoxW(m_hwnd, L"歌词匹配成功。", L"匹配歌词", MB_OK | MB_ICONINFORMATION);
-    }
-
-    void SaveLyricsMap() {
-        std::wstring filePath = GetExeDirectory() + L"\\.lyrics_map.txt";
-        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
-            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE) return;
-        DWORD written;
-        const WORD bom = 0xFEFF;
-        WriteFile(hFile, &bom, 2, &written, NULL);
-        for (auto& kv : m_lyricsMap) {
-            std::wstring line = kv.first + L"|" + kv.second + L"\n";
-            WriteFile(hFile, line.c_str(), (DWORD)(line.size() * sizeof(wchar_t)), &written, NULL);
-        }
-        CloseHandle(hFile);
-    }
-
-    void LoadLyricsMap() {
-        m_lyricsMap.clear();
-        std::wstring filePath = GetExeDirectory() + L"\\.lyrics_map.txt";
-        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
-            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE) return;
-        DWORD size = GetFileSize(hFile, NULL);
-        if (size > 2) {
-            DWORD read = 0;
-            std::wstring buf(size / 2 + 1, L'\0');
-            ReadFile(hFile, &buf[0], size, &read, NULL);
-            buf[read / 2] = L'\0';
-            const wchar_t* p = buf.c_str();
-            if (*p == 0xFEFF) p++;
-            while (*p) {
-                const wchar_t* nl = wcschr(p, L'\n');
-                size_t lineLen = nl ? (size_t)(nl - p) : wcslen(p);
-                if (lineLen > 0 && p[lineLen - 1] == L'\r') --lineLen;
-                if (lineLen > 0) {
-                    std::wstring line(p, lineLen);
-                    size_t sep = line.find(L'|');
-                    if (sep != std::wstring::npos) {
-                        std::wstring song = line.substr(0, sep);
-                        std::wstring lrc = line.substr(sep + 1);
-                        if (!song.empty() && !lrc.empty()) m_lyricsMap[song] = lrc;
-                    }
-                }
-                p = nl ? nl + 1 : p + lineLen;
-            }
-        }
-        CloseHandle(hFile);
-    }
-
-    // 歌词设置对话框: 颜色(十六进制/RGB) + 字号
-    void ShowLyricsSettingsDialog() {
-        LyricsStyle style;
-        style.firstColor = m_settings.lyricsColor;
-        style.secondColor = m_settings.lyricsNextColor;
-        style.firstFontSize = m_settings.lyricsFontSize;
-        style.secondFontSize = m_settings.lyricsSecondFontSize;
-        if (!::ShowLyricsSettingsDialog(m_hInst, m_hwnd, style)) return;
-        m_settings.lyricsColor = style.firstColor;
-        m_settings.lyricsNextColor = style.secondColor;
-        m_settings.lyricsFontSize = style.firstFontSize;
-        m_settings.lyricsSecondFontSize = style.secondFontSize;
-        m_lyricWindow.SetColor(m_settings.lyricsColor);
-        m_lyricWindow.SetNextColor(m_settings.lyricsNextColor);
-        m_lyricWindow.SetFontSize(m_settings.lyricsFontSize);
-        m_lyricWindow.SetSecondFontSize(m_settings.lyricsSecondFontSize);
-        SaveSettings();
     }
 
     // Tray icon
@@ -2519,19 +2293,21 @@ private:
             KillTimer(m_hwnd, TIMER_ID_TRAY_READD);
             m_trayReaddActive = false;
         }
-        m_trayIcon.Remove();  // 先删后加, 强制清理可能残留的旧状态
-        m_trayIcon.Add(BuildTrayTipText());
+        if (!m_trayIcon.ReAdd(BuildTrayTipText()))
+            Log(L"[托盘] 重启后重加图标失败 (尝试 %d, err=%lu)", m_trayReaddAttempts, m_trayIcon.LastError());
     }
 
     // 周期性心跳: 不依赖 TaskbarCreated (Win11 及第三方任务栏可能不广播该消息),
     // 每 5 秒用 NIM_MODIFY 重新断言图标存在并保持可见; 若图标已被系统清除则 NIM_MODIFY
     // 失败, 借此探测并重新 NIM_ADD。
     void OnTrayWatchdog() {
-        m_trayIcon.Reassert(BuildTrayTipText());
+        if (!m_trayIcon.Reassert(BuildTrayTipText()))
+            Log(L"[托盘] 心跳重断言失败 (added=%d err=%lu)", (int)m_trayIcon.IsAdded(), m_trayIcon.LastError());
     }
 
     void AddTrayIcon() {
-        m_trayIcon.Add(BuildTrayTipText());
+        if (!m_trayIcon.ReAdd(BuildTrayTipText()))
+            Log(L"[托盘] 添加图标失败 (err=%lu)", m_trayIcon.LastError());
     }
 
     void RemoveTrayIcon() {
@@ -2551,7 +2327,8 @@ private:
     }
 
     void UpdateTrayTip() {
-        m_trayIcon.UpdateTip(BuildTrayTipText());
+        if (!m_trayIcon.UpdateTip(BuildTrayTipText()))
+            Log(L"[托盘] 更新提示失败 (added=%d err=%lu)", (int)m_trayIcon.IsAdded(), m_trayIcon.LastError());
     }
 
     void MinimizeToTray() {
@@ -2598,180 +2375,90 @@ private:
     // Last song progress
     void SaveLastSong() {
         if (m_currentIndex < 0 || !m_audio.IsLoaded()) return;
-        std::wstring filePath = GetExeDirectory() + L"\\.lastsong.txt";
-        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
-            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE) return;
-        DWORD written;
-        const WORD bom = 0xFEFF;
-        WriteFile(hFile, &bom, 2, &written, NULL);
-        wchar_t buf[64];
-        swprintf(buf, 64, L"%d\n", m_currentIndex);
-        WriteFile(hFile, buf, (DWORD)(wcslen(buf) * sizeof(wchar_t)), &written, NULL);
-        double pos = m_audio.GetPosition();
-        swprintf(buf, 64, L"%.3f\n", pos);
-        WriteFile(hFile, buf, (DWORD)(wcslen(buf) * sizeof(wchar_t)), &written, NULL);
-        const std::wstring& path = m_playlist.GetFile(m_currentIndex);
-        std::wstring line = path + L"\n";
-        WriteFile(hFile, line.c_str(), (DWORD)(line.size() * sizeof(wchar_t)), &written, NULL);
-        CloseHandle(hFile);
+        wchar_t idxBuf[64], posBuf[64];
+        swprintf(idxBuf, 64, L"%d\n", m_currentIndex);
+        swprintf(posBuf, 64, L"%.3f\n", m_audio.GetPosition());
+        std::wstring text = std::wstring(idxBuf) + posBuf +
+                            m_playlist.GetFile(m_currentIndex) + L"\n";
+        WriteTextUtf8(GetExeDirectory() + L"\\.lastsong.txt", text);
     }
 
     bool LoadLastSong() {
-        std::wstring filePath = GetExeDirectory() + L"\\.lastsong.txt";
-        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
-            FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE) return false;
+        std::vector<std::wstring> lines =
+            ReadLinesAuto(GetExeDirectory() + L"\\.lastsong.txt");
+        if (lines.size() < 2) return false;
+        int savedIndex = _wtoi(lines[0].c_str());
+        double savedPos = _wtof(lines[1].c_str());
+        std::wstring savedPath = (lines.size() >= 3) ? lines[2] : std::wstring();
 
-        DWORD size = GetFileSize(hFile, NULL);
-        bool loaded = false;
-        if (size > 2) {
-            DWORD read = 0;
-            std::wstring buf(size / 2 + 1, L'\0');
-            ReadFile(hFile, &buf[0], size, &read, NULL);
-            buf[read / 2] = L'\0';
-            CloseHandle(hFile);
-            const wchar_t* p = buf.c_str();
-            if (*p == 0xFEFF) p++;
-            const wchar_t* nl1 = wcschr(p, L'\n');
-            if (!nl1) return false;
-            int savedIndex = _wtoi(std::wstring(p, nl1 - p).c_str());
-            p = nl1 + 1;
-            const wchar_t* nl2 = wcschr(p, L'\n');
-            if (!nl2) return false;
-            double savedPos = _wtof(std::wstring(p, nl2 - p).c_str());
-            p = nl2 + 1;
-            const wchar_t* nl3 = wcschr(p, L'\n');
-            size_t pathLen = nl3 ? (size_t)(nl3 - p) : wcslen(p);
-            if (pathLen > 0 && p[pathLen-1] == L'\r') --pathLen;
-            std::wstring savedPath(p, pathLen);
-            const std::wstring* targetPath = nullptr;
-            int targetIndex = -1;
-            if (!savedPath.empty()) {
-                for (int i = 0; i < m_playlist.GetCount(); i++) {
-                    if (m_playlist.GetFile(i) == savedPath) {
-                        targetPath = &savedPath;
-                        targetIndex = i;
-                        break;
-                    }
+        const std::wstring* targetPath = nullptr;
+        int targetIndex = -1;
+        if (!savedPath.empty()) {
+            for (int i = 0; i < m_playlist.GetCount(); i++) {
+                if (m_playlist.GetFile(i) == savedPath) {
+                    targetPath = &savedPath;
+                    targetIndex = i;
+                    break;
                 }
             }
-            if (targetIndex < 0 && savedIndex >= 0 && savedIndex < m_playlist.GetCount()) {
-                targetPath = &m_playlist.GetFile(savedIndex);
-                targetIndex = savedIndex;
+        }
+        if (targetIndex < 0 && savedIndex >= 0 && savedIndex < m_playlist.GetCount()) {
+            targetPath = &m_playlist.GetFile(savedIndex);
+            targetIndex = savedIndex;
+        }
+        if (targetIndex >= 0 && targetPath) {
+            if (m_audio.Load(*targetPath)) {
+                m_currentIndex = targetIndex;
+                if (savedPos > 0) m_audio.SetPosition(savedPos);
+                return true;
             }
-            if (targetIndex >= 0 && targetPath) {
-                if (m_audio.Load(*targetPath)) {
-                    m_currentIndex = targetIndex;
-                    if (savedPos > 0) m_audio.SetPosition(savedPos);
-                    loaded = true;
-                }
-            }
-        } else { CloseHandle(hFile); }
-        return loaded;
+        }
+        return false;
     }
 
     
     // Play count persistence
     void SavePlayCount() {
         if (m_playCount.empty()) return;
-        std::wstring filePath = GetExeDirectory() + L"\\.playcount.txt";
-        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
-            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE) return;
-        DWORD written;
-        const WORD bom = 0xFEFF;
-        WriteFile(hFile, &bom, 2, &written, NULL);
-        for (const auto& entry : m_playCount) {
-            std::wstring line = entry.first + L"=" + std::to_wstring(entry.second) + L"\n";
-            WriteFile(hFile, line.c_str(), (DWORD)(line.size() * sizeof(wchar_t)), &written, NULL);
-        }
-        CloseHandle(hFile);
+        std::wstring text;
+        for (const auto& entry : m_playCount)
+            text += entry.first + L"=" + std::to_wstring(entry.second) + L"\n";
+        WriteTextUtf8(GetExeDirectory() + L"\\.playcount.txt", text);
     }
 
     void LoadPlayCount() {
-        std::wstring filePath = GetExeDirectory() + L"\\.playcount.txt";
-        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
-            FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE) return;
-        DWORD size = GetFileSize(hFile, NULL);
-        if (size > 2) {
-            DWORD read = 0;
-            std::wstring buf(size / 2 + 1, L'\0');
-            ReadFile(hFile, &buf[0], size, &read, NULL);
-            buf[read / 2] = L'\0';
-            CloseHandle(hFile);
-            const wchar_t* p = buf.c_str();
-            if (*p == 0xFEFF) p++;
-            while (*p) {
-                const wchar_t* nl = wcschr(p, L'\n');
-                size_t lineLen = nl ? (size_t)(nl - p) : wcslen(p);
-                if (lineLen > 0 && p[lineLen-1] == L'\r') --lineLen;
-                if (lineLen > 0) {
-                    std::wstring line(p, lineLen);
-                    size_t eq = line.find(L'=');
-                    if (eq != std::wstring::npos) {
-                        std::wstring path = line.substr(0, eq);
-                        int count = _wtoi(line.substr(eq + 1).c_str());
-                        if (count > 0) m_playCount[path] = count;
-                    }
-                }
-                p = nl ? nl + 1 : p + lineLen;
-            }
-        } else { CloseHandle(hFile); }
+        for (const std::wstring& line :
+                ReadLinesAuto(GetExeDirectory() + L"\\.playcount.txt")) {
+            size_t eq = line.find(L'=');
+            if (eq == std::wstring::npos) continue;
+            std::wstring path = line.substr(0, eq);
+            int count = _wtoi(line.substr(eq + 1).c_str());
+            if (count > 0) m_playCount[path] = count;
+        }
     }
 
     // Playlist persistence
     void SavePlaylist() {
         if (m_playlist.IsEmpty()) return;
-        std::wstring filePath = GetExeDirectory() + L"\\.playlist.txt";
-        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
-            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE) return;
-        DWORD written;
-        const WORD bom = 0xFEFF;
-        WriteFile(hFile, &bom, 2, &written, NULL);
-        for (int i = 0; i < m_playlist.GetCount(); i++) {
-            std::wstring line = m_playlist.GetFile(i) + L"\n";
-            WriteFile(hFile, line.c_str(), (DWORD)(line.size() * sizeof(wchar_t)), &written, NULL);
-        }
-        CloseHandle(hFile);
+        std::wstring text;
+        for (int i = 0; i < m_playlist.GetCount(); i++)
+            text += m_playlist.GetFile(i) + L"\n";
+        WriteTextUtf8(GetExeDirectory() + L"\\.playlist.txt", text);
     }
 
     bool LoadPlaylist() {
-        std::wstring filePath = GetExeDirectory() + L"\\.playlist.txt";
-        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
-            FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE) return false;
-        DWORD size = GetFileSize(hFile, NULL);
-        bool loaded = false;
-        if (size > 2) {
-            DWORD read = 0;
-            std::wstring buf(size / 2 + 1, L'\0');
-            ReadFile(hFile, &buf[0], size, &read, NULL);
-            buf[read / 2] = L'\0';
-            const wchar_t* p = buf.c_str();
-            if (*p == 0xFEFF) p++;
-            m_playlist.Clear();
-            while (*p) {
-                const wchar_t* nl = wcschr(p, L'\n');
-                size_t lineLen = nl ? (size_t)(nl - p) : wcslen(p);
-                if (lineLen > 0 && p[lineLen-1] == L'\r') --lineLen;
-                if (lineLen > 0) {
-                    std::wstring line(p, lineLen);
-                    if (GetFileAttributesW(line.c_str()) != INVALID_FILE_ATTRIBUTES)
-                        m_playlist.AddFile(line);
-                }
-                p = nl ? nl + 1 : p + lineLen;
-            }
-            loaded = !m_playlist.IsEmpty();
+        m_playlist.Clear();
+        for (const std::wstring& line :
+                ReadLinesAuto(GetExeDirectory() + L"\\.playlist.txt")) {
+            if (GetFileAttributesW(line.c_str()) != INVALID_FILE_ATTRIBUTES)
+                m_playlist.AddFile(line);
         }
+        bool loaded = !m_playlist.IsEmpty();
         if (loaded) {
             m_playlist.Sort(1, true);
             m_sortColumn = 1;
             m_sortAscending = true;
         }
-        CloseHandle(hFile);
         RefreshPlaylistUI();
         if (loaded)
             SetWindowTextW(m_staticSong,
@@ -2779,55 +2466,29 @@ private:
         return loaded;
     }
 
-    
+
     // Last folder persistence
     void SaveLastFolder(const std::wstring& folderPath) {
-        std::wstring filePath = GetExeDirectory() + L"\\.lastfolder.txt";
-        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
-            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE) return;
-        DWORD written;
-        const WORD bom = 0xFEFF;
-        WriteFile(hFile, &bom, 2, &written, NULL);
-        std::wstring data = folderPath + L"\n";
-        WriteFile(hFile, data.c_str(), (DWORD)(data.size() * sizeof(wchar_t)), &written, NULL);
-        CloseHandle(hFile);
+        WriteTextUtf8(GetExeDirectory() + L"\\.lastfolder.txt", folderPath + L"\n");
     }
 
     bool LoadFromLastFolder() {
-        std::wstring filePath = GetExeDirectory() + L"\\.lastfolder.txt";
-        HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
-            FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE) return false;
-        DWORD size = GetFileSize(hFile, NULL);
-        bool loaded = false;
-        if (size > 2) {
-            DWORD read = 0;
-            std::wstring buf(size / 2 + 1, L'\0');
-            ReadFile(hFile, &buf[0], size, &read, NULL);
-            buf[read / 2] = L'\0';
-            const wchar_t* p = buf.c_str();
-            if (*p == 0xFEFF) p++;
-            size_t len = wcslen(p);
-            while (len > 0 && (p[len-1] == L'\n' || p[len-1] == L'\r')) --len;
-            if (len > 0) {
-                std::wstring folder(p, len);
-                if (GetFileAttributesW(folder.c_str()) != INVALID_FILE_ATTRIBUTES &&
-                    (GetFileAttributesW(folder.c_str()) & FILE_ATTRIBUTE_DIRECTORY)) {
-                    m_playlist.ScanFolder(folder);
-                    m_sortColumn = 1;
-                    m_sortAscending = true;
-                    RefreshPlaylistUI();
-                    if (!m_playlist.IsEmpty()) {
-                        SetWindowTextW(m_staticSong,
-                            (L"已加载 " + std::to_wstring(m_playlist.GetCount()) + L" 首歌曲").c_str());
-                        loaded = true;
-                    }
-                }
-            }
+        std::vector<std::wstring> lines =
+            ReadLinesAuto(GetExeDirectory() + L"\\.lastfolder.txt");
+        if (lines.empty()) return false;
+        const std::wstring& folder = lines[0];
+        if (GetFileAttributesW(folder.c_str()) == INVALID_FILE_ATTRIBUTES ||
+            !(GetFileAttributesW(folder.c_str()) & FILE_ATTRIBUTE_DIRECTORY)) {
+            return false;
         }
-        CloseHandle(hFile);
-        return loaded;
+        m_playlist.ScanFolder(folder);
+        m_sortColumn = 1;
+        m_sortAscending = true;
+        RefreshPlaylistUI();
+        if (m_playlist.IsEmpty()) return false;
+        SetWindowTextW(m_staticSong,
+            (L"已加载 " + std::to_wstring(m_playlist.GetCount()) + L" 首歌曲").c_str());
+        return true;
     }
 
     // Volume persistence

@@ -66,6 +66,19 @@ public:
     bool IsFading() const { return m_fading; }
     void SetFadeNotify(HWND hwnd, UINT msg) { m_fadeHwnd = hwnd; m_fadeMsg = msg; }
 
+    // 以 BASS 的真实状态校正播放/暂停标志 (设备丢失、系统休眠等导致标志与现实脱节时对账);
+    // 返回 true 表示标志发生了变化
+    bool SyncStateFromBass();
+    // 休眠唤醒后恢复输出: 收尾可能被休眠打断的淡出, 并在设备被系统停掉时尝试重新起播;
+    // 返回 true 表示当前确在播放
+    bool ResumeAfterSuspend();
+    // 结束进行中的暂停淡出 (取消同步器, 立即暂停并还原音量)。
+    // 淡出的滑动同步回调可能因休眠/设备丢失而永远不触发, 需主动收尾, 否则状态会卡在"正在播放";
+    // 返回是否确有进行中的淡出被收尾
+    bool FinishPendingPause();
+    // 暂停淡出是否已超过预期耗时仍未完成 (用于兜底收尾)
+    bool IsFadeStuck() const;
+
     // 音量 (0-100)
     void SetVolume(int volume);
     int GetVolume() const { return m_volume; }
@@ -146,6 +159,7 @@ private:
     UINT    m_fadeMsg;      // 淡出完成消息
     bool    m_fading;       // 是否正在淡出
     HSYNC   m_fadeSync;     // 淡出同步器句柄
+    ULONGLONG m_fadeDeadline; // 暂停淡出预期完成的时刻 (GetTickCount64), 0 = 无进行中的淡出
     UINT    m_notifyMsg;    // 通知消息
     AudioError m_error;     // 最后一次操作的错误码
 };

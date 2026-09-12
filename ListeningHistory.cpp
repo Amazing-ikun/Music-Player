@@ -1,4 +1,5 @@
 #include "ListeningHistory.h"
+#include "TextFile.h"
 #include <ctime>
 #include <cstdio>
 #include <vector>
@@ -104,58 +105,24 @@ void ListeningHistory::AddSession(double seconds, time_t startTime) {
 void ListeningHistory::Load(const std::wstring& filePath) {
     m_filePath = filePath;
     m_daily.clear();
-    HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
-        FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) return;
-
-    DWORD size = GetFileSize(hFile, NULL);
-    if (size > 2) {
-        DWORD read = 0;
-        std::wstring buf(size / 2 + 1, L'\0');
-        ReadFile(hFile, &buf[0], size, &read, NULL);
-        buf[read / 2] = L'\0';
-        const wchar_t* p = buf.c_str();
-        if (*p == 0xFEFF) p++;
-        while (*p) {
-            const wchar_t* nl = wcschr(p, L'\n');
-            size_t lineLen = nl ? (size_t)(nl - p) : wcslen(p);
-            if (lineLen > 0 && p[lineLen - 1] == L'\r') --lineLen;
-            if (lineLen > 0) {
-                std::wstring line(p, lineLen);
-                size_t eq = line.find(L'=');
-                if (eq != std::wstring::npos && eq > 0) {
-                    std::wstring date = line.substr(0, eq);
-                    std::wstring val = line.substr(eq + 1);
-                    char dateBuf[32];
-                    snprintf(dateBuf, sizeof(dateBuf), "%ls", date.c_str());
-                    m_daily[dateBuf] += wcstod(val.c_str(), NULL);
-                }
-            }
-            p = nl ? nl + 1 : p + lineLen;
-        }
+    for (const std::wstring& line : ReadLinesAuto(filePath)) {
+        size_t eq = line.find(L'=');
+        if (eq == std::wstring::npos || eq == 0) continue;
+        std::string date = WideToUtf8(line.substr(0, eq));
+        m_daily[date] += wcstod(line.substr(eq + 1).c_str(), NULL);
     }
-    CloseHandle(hFile);
     m_dirty = false;
 }
 
 void ListeningHistory::Save(const std::wstring& filePath) {
     if (!m_dirty && filePath == m_filePath) return;
-    HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
-        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) return;
-    DWORD written;
-    const WORD bom = 0xFEFF;
-    WriteFile(hFile, &bom, 2, &written, NULL);
+    std::wstring text;
     for (const auto& entry : m_daily) {
         if (entry.second <= 0) continue;
-        wchar_t dateW[32];
-        swprintf(dateW, 32, L"%hs", entry.first.c_str());
-        std::wstring line = std::wstring(dateW) + L"=" +
+        text += Utf8ToWide(entry.first) + L"=" +
             std::to_wstring(entry.second) + L"\n";
-        WriteFile(hFile, line.c_str(),
-            (DWORD)(line.size() * sizeof(wchar_t)), &written, NULL);
     }
-    CloseHandle(hFile);
+    WriteTextUtf8(filePath, text);
     m_dirty = false;
 }
 
@@ -330,16 +297,6 @@ std::string ListeningHistory::FormatDateShort(int year, int month, int day) {
 }
 
 // ---- StatsExportData ----
-
-// UTF-8 conversion for JSON/CSV output so Excel reads CJK correctly
-static std::string WideToUtf8(const std::wstring& ws) {
-    if (ws.empty()) return {};
-    int n = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), (int)ws.size(), NULL, 0, NULL, NULL);
-    if (n <= 0) return {};
-    std::string out(n, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), (int)ws.size(), &out[0], n, NULL, NULL);
-    return out;
-}
 
 // Escape a UTF-8 string for embedding in JSON
 static std::string JsonEscape(const std::wstring& s) {

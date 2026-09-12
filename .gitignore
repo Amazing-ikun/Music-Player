@@ -24,6 +24,7 @@ build/
 .playcount.txt
 .loudness.txt
 .durations.txt
+.lyrics_map.txt
 .error.log
 .stats_export.json
 

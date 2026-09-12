@@ -62,7 +62,7 @@ LyricWindow::LyricWindow()
       m_scrolling(false), m_scrollOffset(0), m_scrollMax(0),
       m_locked(false), m_showTranslation(false),
       m_dib(NULL), m_dibBits(NULL), m_dibDC(NULL), m_dibOldBmp(NULL),
-      m_dibW(0), m_dibH(0) {}
+      m_dibW(0), m_dibH(0), m_listener(nullptr) {}
 
 LyricWindow::~LyricWindow() {
     Destroy();
@@ -476,10 +476,8 @@ LRESULT LyricWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
                              SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
                 Redraw();
 
-                if (changed) {
-                    if (m_onFontSizeChanged) m_onFontSizeChanged(m_fontSize);
-                    if (m_onSecondFontSizeChanged) m_onSecondFontSizeChanged(m_secondFontSize);
-                }
+                if (changed && m_listener)
+                    m_listener->OnFontSizeChanged(m_fontSize, m_secondFontSize);
             }
             return 0;
         }
@@ -518,20 +516,20 @@ LRESULT LyricWindow::HandleMessage(UINT msg, WPARAM wp, LPARAM lp) {
                 }
                 case 2:
                     SetLocked(!m_locked);
-                    if (m_onLockedChanged) m_onLockedChanged(m_locked);
+                    if (m_listener) m_listener->OnLockedChanged(m_locked);
                     break;
                 case 3:
                     SetShowTranslation(!m_showTranslation);
-                    if (m_onTranslationChanged) m_onTranslationChanged(m_showTranslation);
+                    if (m_listener) m_listener->OnTranslationChanged(m_showTranslation);
                     break;
                 case 4:
-                    if (m_onPrevNext) m_onPrevNext(false);
+                    if (m_listener) m_listener->OnPrevNext(false);
                     break;
                 case 5:
-                    if (m_onPrevNext) m_onPrevNext(true);
+                    if (m_listener) m_listener->OnPrevNext(true);
                     break;
                 case 6:
-                    if (m_onHide) m_onHide();
+                    if (m_listener) m_listener->OnHidden();
                     break;
             }
             return 0;

@@ -143,3 +143,10 @@ install(FILES
 if (MINGW)
     install(FILES "${MINGW_RUNTIME_DLL}" DESTINATION .)
 endif()
+# 许可证与第三方归属: Apache-2.0 第 4 条要求向接收者随附一份许可文本
+install(FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+    "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE-Apache-2.0.txt"
+    "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE-BSD-3-Clause.txt"
+    "${CMAKE_CURRENT_SOURCE_DIR}/NOTICE"
+    DESTINATION licenses)

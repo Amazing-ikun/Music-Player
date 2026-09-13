@@ -1,0 +1,44 @@
+MusicPlayer
+Copyright (c) 2026 Amazing-ikun
+
+This product is licensed under the Apache License, Version 2.0 AND the
+BSD 3-Clause License (SPDX: Apache-2.0 AND BSD-3-Clause).
+See LICENSE, LICENSE-Apache-2.0.txt and LICENSE-BSD-3-Clause.txt.
+
+This NOTICE file is provided in accordance with Section 4(d) of the Apache
+License, Version 2.0, and to record the attribution required by the other
+licenses covering the third-party components listed below.
+
+
+Third-party components
+======================
+
+1. BASS audio library and add-ons
+   Files: bass/include/bass.h, bass/include/bass_fx.h,
+          bass/lib/x64/bass.dll, bass_fx.dll, bassflac.dll (and the matching
+          import libraries bass.lib, bass_fx.lib, bassflac.lib)
+   Copyright (c) Un4seen Developments Ltd.  All rights reserved.
+
+   BASS is proprietary software and is NOT covered by this project's
+   licenses. It is free of charge for non-commercial use; using BASS in a
+   commercial product requires a license purchased from Un4seen
+   Developments. The files are redistributed unmodified and only as
+   permitted by the BASS license. See https://www.un4seen.com/ for the
+   authoritative terms.
+
+2. libwinpthread-1.dll
+   Copyright (c) 2011 mingw-w64 project
+
+   Licensed under an MIT-style permissive license (permission is hereby
+   granted, free of charge, to any person obtaining a copy of this software
+   and associated documentation files, to deal in the Software without
+   restriction, provided the copyright notice and this permission notice
+   are included). Portions are derived from the "Posix Threads library for
+   Microsoft Windows". Source: https://www.mingw-w64.org/
+
+3. GCC runtime, statically linked (libgcc, libstdc++)
+   Copyright (c) Free Software Foundation, Inc.
+
+   Distributed under the GNU General Public License version 3 with the GCC
+   Runtime Library Exception, which permits linking these runtime libraries
+   with independent modules. No source code from these libraries is modified.

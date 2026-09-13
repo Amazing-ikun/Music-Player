@@ -1,3 +1,4 @@
+; SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 ; ============================================================
 ; MusicPlayer 安装脚本 (Inno Setup 7)
 ;
@@ -25,7 +26,7 @@
 #if !FileExists(AddBackslash(SourcePath) + DistDir + "\" + AppExe)
   #error 未找到 dist\MusicPlayer.exe, 请先执行 cmake --install <build> --prefix dist
 #endif
-#define FullVersion GetFileVersion(AddBackslash(SourcePath) + DistDir + "\" + AppExe)
+#define FullVersion GetVersionNumbersString(AddBackslash(SourcePath) + DistDir + "\" + AppExe)
 ; RemoveFileExt 砍掉最后一段, 把 "2.1.0.0" 变成 "2.1.0"
 #define AppVersion  RemoveFileExt(FullVersion)
 
@@ -53,6 +54,8 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 VersionInfoVersion={#FullVersion}
+; 许可协议页: 展示 LICENSE(声明 AND 关系与范围, 并指向两份全文); 不接受则无法继续安装
+LicenseFile=..\LICENSE
 ; 程序运行中时提示先关闭 (与 WinMain 里的单实例互斥体同名)
 AppMutex=Local\MusicPlayer_SingleInstance
 CloseApplications=yes
@@ -72,6 +75,8 @@ Source: "{#DistDir}\bass_fx.dll";         DestDir: "{app}"; Flags: ignoreversion
 Source: "{#DistDir}\bassflac.dll";        DestDir: "{app}"; Flags: ignoreversion
 ; MinGW 运行库(静态 libstdc++ 仍引用 winpthread)
 Source: "{#DistDir}\libwinpthread-1.dll"; DestDir: "{app}"; Flags: ignoreversion
+; 许可证与第三方归属 (Apache-2.0 第 4 条要求随附许可文本)
+Source: "{#DistDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#AppName}";       Filename: "{app}\{#AppExe}"

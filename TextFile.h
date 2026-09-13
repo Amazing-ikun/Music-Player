@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 #pragma once
 #include <string>
 #include <vector>

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 #define WIN32_LEAN_AND_MEAN
 #define UNICODE
 #define _UNICODE

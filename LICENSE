@@ -1,0 +1,44 @@
+MusicPlayer
+Copyright (c) 2026 Amazing-ikun
+
+This project is licensed under the Apache License, Version 2.0 AND the
+BSD 3-Clause License.
+
+    SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
+
+"AND" — not "OR" — means both licenses apply at the same time: anyone who
+uses, modifies, or redistributes this project must comply with the terms of
+BOTH licenses simultaneously. Where the two licenses differ, the stricter
+requirement applies (for example, Apache-2.0 additionally requires keeping a
+NOTICE file and grants an express patent license, while BSD-3-Clause forbids
+using the copyright holder's name to endorse derived products).
+
+The full text of each license is included in this repository:
+
+    LICENSE-Apache-2.0.txt      Apache License, Version 2.0 (verbatim)
+    LICENSE-BSD-3-Clause.txt    BSD 3-Clause License
+
+See NOTICE for the required attribution notices.
+
+------------------------------------------------------------------------------
+THIRD-PARTY COMPONENTS ARE NOT COVERED BY THE LICENSES ABOVE
+------------------------------------------------------------------------------
+
+This project builds against, and redistributes, the proprietary BASS audio
+library and its add-ons:
+
+    bass/include/bass.h
+    bass/include/bass_fx.h
+    bass/lib/x64/bass.dll       bass.lib
+    bass/lib/x64/bass_fx.dll    bass_fx.lib
+    bass/lib/x64/bassflac.dll   bassflac.lib
+
+These files are Copyright (c) Un4seen Developments Ltd. and are governed
+solely by the BASS license (https://www.un4seen.com/), NOT by Apache-2.0 or
+BSD-3-Clause. BASS is free of charge for non-commercial use; commercial use
+requires a license purchased from Un4seen Developments. The BASS files may
+not be relicensed, and may only be redistributed as permitted by the BASS
+license.
+
+The Windows build also redistributes libwinpthread-1.dll from the mingw-w64
+project under its own MIT-style license. See NOTICE.

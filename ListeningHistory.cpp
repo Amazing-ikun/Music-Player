@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 #include "ListeningHistory.h"
 #include "TextFile.h"
 #include <ctime>

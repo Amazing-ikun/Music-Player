@@ -17,14 +17,16 @@ Third-party components
    Files: bass/include/bass.h, bass/include/bass_fx.h,
           bass/lib/x64/bass.dll, bass_fx.dll, bassflac.dll (and the matching
           import libraries bass.lib, bass_fx.lib, bassflac.lib)
-   Copyright (c) Un4seen Developments Ltd.  All rights reserved.
+   Copyright (c) 1999-2025 Un4seen Developments Ltd.  All rights reserved.
 
-   BASS is proprietary software and is NOT covered by this project's
-   licenses. It is free of charge for non-commercial use; using BASS in a
-   commercial product requires a license purchased from Un4seen
-   Developments. The files are redistributed unmodified and only as
-   permitted by the BASS license. See https://www.un4seen.com/ for the
-   authoritative terms.
+   BASS is proprietary software and is NOT covered by this project's licenses.
+   This project is a personal, non-commercial hobby project; BASS is free of
+   charge for non-commercial use. Any commercial use requires a license
+   purchased from Un4seen Developments. BASS must be obtained separately from
+   Un4seen Developments (https://www.un4seen.com/): the unmodified copies kept
+   under bass/ are included only so that the project can be built, and they
+   confer no rights under this project's licenses. The full BASS license text
+   is reproduced in BASS-LICENSE.txt.
 
 2. libwinpthread-1.dll
    Copyright (c) 2011 mingw-w64 project

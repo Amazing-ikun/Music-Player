@@ -3,8 +3,10 @@
 #include <string>
 #include <map>
 #include <windows.h>
-#include <bass.h>
-#include <bass_fx.h>
+// 注意: 这里刻意不包含 bass.h / bass_fx.h。
+// BASS 改为运行时加载后, AudioEngine.cpp 用 BASSDEF 技巧把函数声明变成函数指针,
+// 那些指针属于"定义", 因此 bass.h 只能被 AudioEngine.cpp 这一个编译单元包含。
+// 句柄类型 HSTREAM / HSYNC 本质就是 DWORD, 故下面直接用 DWORD 代替。
 
 // ============================================
 // Playback Modes
@@ -122,15 +124,15 @@ public:
 
 private:
     // BASS 同步回调：歌曲播放结束
-    static void CALLBACK EndSyncProc(HSYNC handle, DWORD channel, DWORD data, void* user);
+    static void CALLBACK EndSyncProc(DWORD handle, DWORD channel, DWORD data, void* user);
     // BASS 同步回调：淡出滑动完成
-    static void CALLBACK FadeSyncProc(HSYNC handle, DWORD channel, DWORD data, void* user);
+    static void CALLBACK FadeSyncProc(DWORD handle, DWORD channel, DWORD data, void* user);
 
     // 将BASS错误码映射为内部错误码
     static AudioError MapBassError(int bassCode);
 
-    HSTREAM m_stream;       // BASS 音频流句柄
-    HSYNC   m_endSync;      // 结束同步器句柄
+    DWORD   m_stream;       // BASS 音频流句柄 (HSTREAM)
+    DWORD   m_endSync;      // 结束同步器句柄 (HSYNC)
     int     m_volume;       // 音量 0-100
 
     // ---- 音量平衡 ----
@@ -159,7 +161,7 @@ private:
     HWND    m_fadeHwnd;     // 淡出通知窗口
     UINT    m_fadeMsg;      // 淡出完成消息
     bool    m_fading;       // 是否正在淡出
-    HSYNC   m_fadeSync;     // 淡出同步器句柄
+    DWORD   m_fadeSync;     // 淡出同步器句柄 (HSYNC)
     ULONGLONG m_fadeDeadline; // 暂停淡出预期完成的时刻 (GetTickCount64), 0 = 无进行中的淡出
     UINT    m_notifyMsg;    // 通知消息
     AudioError m_error;     // 最后一次操作的错误码

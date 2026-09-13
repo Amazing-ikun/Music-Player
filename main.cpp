@@ -565,12 +565,10 @@ private:
         CreateControls();
 
         if (!m_audio.Initialize(m_hwnd)) {
+            // BASS 是运行时加载的, 错误信息里已说明缺哪个 DLL 以及去哪下载
             WriteLog(L"初始化音频引擎失败: %ls", m_audio.GetErrorMessage().c_str());
             MessageBoxW(m_hwnd,
-                (L"无法初始化音频引擎 (bass.dll)。\n\n"
-                 L"请确保 bass.dll 位于程序目录或系统路径中。\n"
-                 L"下载地址: https://www.un4seen.com/bass.html\n\n"
-                 L"错误详情: " + m_audio.GetErrorMessage()).c_str(),
+                (L"无法初始化音频引擎。\n\n" + m_audio.GetErrorMessage()).c_str(),
                 L"音频初始化失败", MB_OK | MB_ICONWARNING);
         }
 

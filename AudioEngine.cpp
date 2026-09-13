@@ -1,4 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
+// ---------------------------------------------------------------------------
+// BASS 采用运行时加载, 不静态导入 bass.dll / bass_fx.dll。
+//
+// 若静态导入, 缺少 DLL 时进程会在加载阶段就被系统拒绝, 弹出
+// "由于找不到 BASS_FX.dll, 无法继续执行代码。重新安装程序可能会解决此问题。"
+// —— 那句"重新安装"是误导(包里本就没有这些 DLL), 而且我们的代码一行都不会执行,
+// 也就没机会告诉用户去哪里下载。改成运行时加载后程序能正常启动,
+// 由 GetErrorMessage() 说明缺了哪个 DLL 以及下载地址。
+//
+// BASSDEF / BASS_FXDEF 令头文件里的函数声明变成函数指针, 由下面的加载器填充。
+// 因为那是指针的"定义", bass.h 只能被本编译单元包含(故 AudioEngine.h 不再包含它)。
+#define BASSDEF(f)    (WINAPI *f)
+#define BASS_FXDEF(f) (WINAPI *f)
+#include <windows.h>
+#include <bass.h>
+#include <bass_fx.h>
+
 #include "AudioEngine.h"
 #include "TextFile.h"
 #include <cstring>
@@ -6,7 +23,112 @@
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
+#include <string>
 #pragma warning(disable : 4996)
+
+namespace {
+
+// 加载状态: 只在首次 Initialize 时解析一次
+enum class BassLibState { NotTried, Ready, Failed };
+BassLibState g_bassState = BassLibState::NotTried;
+std::wstring g_bassLoadError;   // 加载失败的具体原因, 供 GetErrorMessage() 展示
+
+// 函数名 → 指针地址
+struct BassSymbol {
+    const char* name;
+    void**      slot;
+};
+
+// bass.dll 中本工程用到的全部函数。新增 BASS 调用时必须同步补到这里,
+// 否则该指针为 null, 会在运行期崩溃。
+const BassSymbol kBassSymbols[] = {
+    { "BASS_Init",                    (void**)&BASS_Init },
+    { "BASS_Free",                    (void**)&BASS_Free },
+    { "BASS_SetConfig",               (void**)&BASS_SetConfig },
+    { "BASS_ErrorGetCode",            (void**)&BASS_ErrorGetCode },
+    { "BASS_StreamCreateFile",        (void**)&BASS_StreamCreateFile },
+    { "BASS_StreamFree",              (void**)&BASS_StreamFree },
+    { "BASS_PluginLoad",              (void**)&BASS_PluginLoad },
+    { "BASS_ChannelPlay",             (void**)&BASS_ChannelPlay },
+    { "BASS_ChannelPause",            (void**)&BASS_ChannelPause },
+    { "BASS_ChannelStop",             (void**)&BASS_ChannelStop },
+    { "BASS_ChannelIsActive",         (void**)&BASS_ChannelIsActive },
+    { "BASS_ChannelGetInfo",          (void**)&BASS_ChannelGetInfo },
+    { "BASS_ChannelGetData",          (void**)&BASS_ChannelGetData },
+    { "BASS_ChannelGetTags",          (void**)&BASS_ChannelGetTags },
+    { "BASS_ChannelGetLength",        (void**)&BASS_ChannelGetLength },
+    { "BASS_ChannelGetPosition",      (void**)&BASS_ChannelGetPosition },
+    { "BASS_ChannelSetPosition",      (void**)&BASS_ChannelSetPosition },
+    { "BASS_ChannelSetAttribute",     (void**)&BASS_ChannelSetAttribute },
+    { "BASS_ChannelSlideAttribute",   (void**)&BASS_ChannelSlideAttribute },
+    { "BASS_ChannelSetSync",          (void**)&BASS_ChannelSetSync },
+    { "BASS_ChannelRemoveSync",       (void**)&BASS_ChannelRemoveSync },
+    { "BASS_ChannelBytes2Seconds",    (void**)&BASS_ChannelBytes2Seconds },
+    { "BASS_ChannelSeconds2Bytes",    (void**)&BASS_ChannelSeconds2Bytes },
+};
+
+// bass_fx.dll (变速不变调) 中本工程用到的函数
+const BassSymbol kBassFxSymbols[] = {
+    { "BASS_FX_GetVersion",  (void**)&BASS_FX_GetVersion },
+    { "BASS_FX_TempoCreate", (void**)&BASS_FX_TempoCreate },
+};
+
+// 先按 exe 同目录的绝对路径加载(符合 BASS 官方"与可执行文件同目录"的建议),
+// 失败再按系统搜索顺序(含 PATH)加载
+HMODULE LoadBassLibrary(const wchar_t* fileName) {
+    wchar_t exePath[MAX_PATH] = {};
+    DWORD n = GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        wchar_t* slash = wcsrchr(exePath, L'\\');
+        if (slash) {
+            *slash = L'\0';
+            std::wstring full = std::wstring(exePath) + L"\\" + fileName;
+            if (HMODULE m = LoadLibraryW(full.c_str())) return m;
+        }
+    }
+    return LoadLibraryW(fileName);
+}
+
+// 解析全部符号; 任一失败即返回 false
+bool ResolveSymbols(HMODULE mod, const BassSymbol* syms, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        *syms[i].slot = (void*)GetProcAddress(mod, syms[i].name);
+        if (*syms[i].slot == nullptr) return false;
+    }
+    return true;
+}
+
+const wchar_t* kDownloadHint =
+    L"请从 https://www.un4seen.com/ 下载 BASS(含 BASS_FX、BASSFLAC), "
+    L"把 bass.dll、bass_fx.dll、bassflac.dll 复制到程序所在目录。";
+
+// 加载 bass.dll 与 bass_fx.dll 并解析函数指针; 只尝试一次
+bool EnsureBassLoaded() {
+    if (g_bassState != BassLibState::NotTried) return g_bassState == BassLibState::Ready;
+
+    // 加载失败时把指针表清空, 避免残留的 null 被误用
+    auto fail = [](const std::wstring& why) {
+        g_bassLoadError = why;
+        g_bassState = BassLibState::Failed;
+        return false;
+    };
+
+    HMODULE bass = LoadBassLibrary(L"bass.dll");
+    if (!bass) return fail(std::wstring(L"找不到 bass.dll。") + kDownloadHint);
+    if (!ResolveSymbols(bass, kBassSymbols, sizeof(kBassSymbols) / sizeof(kBassSymbols[0])))
+        return fail(std::wstring(L"bass.dll 版本不兼容(缺少所需函数)。") + kDownloadHint);
+
+    HMODULE fx = LoadBassLibrary(L"bass_fx.dll");
+    if (!fx) return fail(std::wstring(L"找不到 bass_fx.dll。") + kDownloadHint);
+    if (!ResolveSymbols(fx, kBassFxSymbols, sizeof(kBassFxSymbols) / sizeof(kBassFxSymbols[0])))
+        return fail(std::wstring(L"bass_fx.dll 版本不兼容(缺少所需函数)。") + kDownloadHint);
+
+    g_bassLoadError.clear();
+    g_bassState = BassLibState::Ready;
+    return true;
+}
+
+}  // namespace
 
 static bool HasExtension(const std::wstring& path, const wchar_t* ext) {
     size_t dot = path.rfind(L'.');
@@ -69,7 +191,7 @@ struct ID3Reader {
         bool valid = false;
     };
 
-    static Result Read(HSTREAM stream) {
+    static Result Read(DWORD stream) {
         Result r;
         const char* id3 = (const char*)BASS_ChannelGetTags(stream, BASS_TAG_ID3);
         if (!id3 || memcmp(id3, "TAG", 3) != 0) return r;
@@ -192,6 +314,11 @@ AudioEngine::~AudioEngine() {
 
 // 初始化 BASS 音频引擎=
 bool AudioEngine::Initialize(HWND hwnd) {
+    // 先运行时加载 BASS; 缺 DLL 或版本不符时在此失败, 程序仍能正常启动并给出提示
+    if (!EnsureBassLoaded()) {
+        m_error = AudioError::InitFailed;
+        return false;
+    }
     // 让 BASS 跟随系统默认输出设备的变化 (合盖休眠、拔插耳机、接入扩展坞都可能切换默认设备)
     BASS_SetConfig(BASS_CONFIG_DEV_DEFAULT, TRUE);
     // 使用默认音频设备，44.1kHz采样率
@@ -217,11 +344,15 @@ void AudioEngine::Cleanup() {
         BASS_StreamFree(m_stream);
         m_stream = 0;
     }
-    BASS_Free();
+    if (g_bassState == BassLibState::Ready) BASS_Free();
 }
 
 // 加载音频文件（流式解码，不加载到内存）
 bool AudioEngine::Load(const std::wstring& filePath) {
+    if (g_bassState != BassLibState::Ready) {
+        m_error = AudioError::InitFailed;
+        return false;
+    }
     Stop();
 
     m_currentPath = filePath;
@@ -245,14 +376,16 @@ bool AudioEngine::Load(const std::wstring& filePath) {
     }
 
     // 创建临时解码流，然后用 BASS_FX_TempoCreate 包装以实现变速不变调
-    HSTREAM decoder = BASS_StreamCreateFile(FALSE, filePath.c_str(), 0, 0,
+    DWORD decoder = BASS_StreamCreateFile(FALSE, filePath.c_str(), 0, 0,
         BASS_STREAM_DECODE | BASS_UNICODE);
     if (!decoder) {
         m_error = MapBassError(BASS_ErrorGetCode());
         // 如果是 FLAC 文件且解码器缺失，给出更明确的提示
         if ((m_error == AudioError::UnsupportedFormat || m_error == AudioError::UnsupportedParam)
             && HasExtension(filePath, L".flac")) {
-            if (!BASS_PluginLoad(L"bassflac.dll", 0)) {
+            // 注意: 用 BASSDEF 函数指针后 NOBASSOVERLOADS 生效, 宽字符重载版不存在,
+            // 故这里传窄字符串(插件名为固定 ASCII, 无影响)
+            if (!BASS_PluginLoad("bassflac.dll", 0)) {
                 m_error = AudioError::MissingCodec;
             }
         }
@@ -321,6 +454,7 @@ void AudioEngine::Stop() {
 // 这样显示 80% 就是真实 80% (修复原先 gvol×chvol 的双重衰减), 且静音/调节不干扰平衡增益。
 void AudioEngine::SetVolume(int volume) {
     m_volume = volume < 0 ? 0 : (volume > 100 ? 100 : volume);
+    if (g_bassState != BassLibState::Ready) return;   // 未加载时只记数值, 不碰 BASS
     BASS_SetConfig(BASS_CONFIG_GVOL_STREAM, (DWORD)(100 * m_volume));
 }
 
@@ -333,6 +467,7 @@ void AudioEngine::SetBalanceEnabled(bool enabled) {
 }
 
 void AudioEngine::ApplyBalance() {
+    if (g_bassState != BassLibState::Ready) return;   // 响度测量需要 BASS 解码流
     float gain = 1.0f;
     if (m_balanceEnabled && !m_currentPath.empty()) {
         double lufs = GetLoudnessLUFS(m_currentPath);
@@ -459,7 +594,7 @@ double AudioEngine::GetLoudnessLUFS(const std::wstring& filePath) {
 
 // 独立解码流测量整曲响度 (EBU R128 两遍门控)
 double AudioEngine::MeasureLoudnessLUFS(const std::wstring& filePath) {
-    HSTREAM decoder = BASS_StreamCreateFile(FALSE, filePath.c_str(), 0, 0,
+    DWORD decoder = BASS_StreamCreateFile(FALSE, filePath.c_str(), 0, 0,
         BASS_STREAM_DECODE | BASS_UNICODE);
     if (!decoder) return -70.0;
 
@@ -541,7 +676,8 @@ double AudioEngine::GetLength() const {
 
 // 独立解码流探测文件时长(秒), 不发声, 不影响正在播放的流
 double AudioEngine::ProbeDuration(const std::wstring& filePath) {
-    HSTREAM decoder = BASS_StreamCreateFile(FALSE, filePath.c_str(), 0, 0,
+    if (g_bassState != BassLibState::Ready) return 0.0;   // BASS 未加载, 时长扫描直接跳过
+    DWORD decoder = BASS_StreamCreateFile(FALSE, filePath.c_str(), 0, 0,
         BASS_STREAM_DECODE | BASS_UNICODE);
     if (!decoder) return 0.0;
     QWORD bytes = BASS_ChannelGetLength(decoder, BASS_POS_BYTE);
@@ -667,7 +803,7 @@ void AudioEngine::NotifyEndOfSong() {
 
 // 静态回调：BASS 播放结束同步
 // 在线程上下文中调用，仅做 PostMessage
-void CALLBACK AudioEngine::EndSyncProc(HSYNC /*handle*/, DWORD /*channel*/,
+void CALLBACK AudioEngine::EndSyncProc(DWORD /*handle*/, DWORD /*channel*/,
                                         DWORD /*data*/, void* user) {
     AudioEngine* engine = static_cast<AudioEngine*>(user);
     if (engine && engine->m_notifyHwnd) {
@@ -677,7 +813,7 @@ void CALLBACK AudioEngine::EndSyncProc(HSYNC /*handle*/, DWORD /*channel*/,
 
 // 淡出同步：音量滑到 0 后通知主线程执行暂停操作
 // 注意：BASS 同步回调中禁止调用 BASS API，仅做 PostMessage
-void CALLBACK AudioEngine::FadeSyncProc(HSYNC, DWORD, DWORD, void* user) {
+void CALLBACK AudioEngine::FadeSyncProc(DWORD, DWORD, DWORD, void* user) {
     AudioEngine* engine = static_cast<AudioEngine*>(user);
     if (!engine) return;
     if (engine->m_fadeHwnd) {
@@ -791,6 +927,7 @@ AudioError AudioEngine::MapBassError(int bassCode) {
 }
 
 std::wstring AudioEngine::GetErrorMessage() const {
+    if (!g_bassLoadError.empty()) return g_bassLoadError;   // 优先报告 BASS 加载失败的具体原因
     switch (m_error) {
         case AudioError::Success:           return L"";
         case AudioError::FileNotFound:      return L"文件不存在或无法访问";

@@ -3,6 +3,14 @@
 一个 Windows 本地音乐播放器（Win32 API + C++20）。支持 MP3 / FLAC / WAV，歌单管理与搜索、
 播放模式（顺序 / 单曲 / 随机）、倍速、音量平衡、桌面歌词悬浮窗、听歌时长统计等功能。
 
+> **注意：本项目不包含 BASS 音频库，需自行下载放置。**
+>
+> - **从源码构建前**：按第一节把 BASS 的头文件、导入库与 DLL 放进 `bass\`，否则 CMake 会直接报错。
+> - **用安装包装好之后**：还需自行把 `bass.dll`、`bass_fx.dll`、`bassflac.dll` 复制到
+>   安装目录（默认 `%LOCALAPPDATA%\Programs\MusicPlayer`），否则程序无法播放。
+>
+> 下载地址：<https://www.un4seen.com/bass.html>（BASS / BASS_FX / BASSFLAC，非商业使用免费）。
+
 ---
 
 ## 一、依赖：BASS 音频库（必须自行下载）
@@ -64,13 +72,14 @@ cmake --build build
    cmake --install cmake-build-release --prefix dist
    ```
 
-2. 用 Inno Setup 编译安装脚本（需自行安装 [Inno Setup](https://jrsoftware.org/isinfo.php)）：
+2. 用 Inno Setup 编译安装脚本（需自行安装 [Inno Setup](https://jrsoftware.org/isinfo.php)，
+   路径按你的实际安装位置调整）：
 
    ```bash
-   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\MusicPlayer.iss
+   "<Inno Setup 安装目录>\ISCC.exe" installer\MusicPlayer.iss
    ```
 
-   安装包输出到 `installer-out\`。
+   安装包输出到 `installer-out\`。版本号由脚本自动从 exe 的 VERSIONINFO 读取，无需手改。
 
 安装包**不附带** BASS 的 DLL（原因见上文）。装完后请自行把 `bass.dll`、`bass_fx.dll`、
 `bassflac.dll` 复制到安装目录，否则程序无法播放（启动时会给出提示与下载地址）。

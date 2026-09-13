@@ -21,7 +21,7 @@ static const wchar_t* CHANGELOG =
     L"  - 修复: FLAC/Ogg 标签读取用错 BASS 常量 (BASS_TAG_META 实为网络流 ICY 元数据), 改用 BASS_TAG_OGG\r\n"
     L"\r\n"
     L"v2.0.1\r\n"
-    L"  - 重构: 代码架构优化(高内聚低耦合), 从主窗口拆出 Settings(设置持久化)/TrayIcon(托盘图标)/Dialogs(全部对话框)/Hotkey(热键类型) 四个模块, 消除对话框对主窗口的反向依赖, main.cpp 由 4490 行精简至约 2900 行\r\n"
+    L"  - 重构: 代码架构优化(高内聚低耦合), 从主窗口拆出 Settings(设置持久化)/TrayIcon(托盘图标)/Dialogs(全部对话框)/Hotkey(热键类型) 四个模块, 消除对话框对主窗口的反向依赖, main.cpp 代码行缩减约35%\r\n"
     L"\r\n"
     L"v2.0.0\r\n"
     L"  - 新增: 桌面歌词悬浮窗 (置顶、无边框、GDI+ 逐像素半透明渲染, 鼠标移开 5 秒后背景透明仅显示歌词)\r\n"

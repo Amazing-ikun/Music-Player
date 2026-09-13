@@ -153,13 +153,13 @@ void LyricsController::SaveMap() {
     std::wstring text;
     for (const auto& kv : m_map)
         text += kv.first + L"|" + kv.second + L"\n";
-    WriteTextUtf8(GetExeDirectory() + L"\\.lyrics_map.txt", text);
+    WriteTextUtf8(DataFile(L"lyrics_map"), text);
 }
 
 void LyricsController::LoadMap() {
     m_map.clear();
     for (const std::wstring& line :
-            ReadLinesAuto(GetExeDirectory() + L"\\.lyrics_map.txt")) {
+            ReadLinesAuto(DataFile(L"lyrics_map"))) {
         size_t sep = line.find(L'|');
         if (sep == std::wstring::npos) continue;
         std::wstring song = line.substr(0, sep);

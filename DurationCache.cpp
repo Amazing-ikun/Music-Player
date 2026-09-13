@@ -5,8 +5,6 @@
 
 namespace {
 
-const wchar_t kFileName[] = L"\\.durations.txt";
-
 bool ReadFileInfo(const std::wstring& path, ULONGLONG& size, FILETIME& mtime) {
     WIN32_FILE_ATTRIBUTE_DATA fad;
     if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad)) return false;
@@ -21,7 +19,7 @@ void DurationCache::EnsureLoaded() const {
     if (m_loaded) return;
     m_loaded = true;
     // 格式: duration<tab>size<tab>timeHigh<tab>timeLow<tab>path(UTF-8)
-    for (const std::wstring& line : ReadLinesAuto(GetExeDirectory() + kFileName)) {
+    for (const std::wstring& line : ReadLinesAuto(DataFile(L"durations"))) {
         size_t t1 = line.find(L'\t');
         if (t1 == std::wstring::npos) continue;
         size_t t2 = line.find(L'\t', t1 + 1);
@@ -84,5 +82,5 @@ void DurationCache::Save() const {
         text += kv.first;
         text += L"\n";
     }
-    WriteTextUtf8(GetExeDirectory() + kFileName, text);
+    WriteTextUtf8(DataFile(L"durations"), text);
 }

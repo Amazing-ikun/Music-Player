@@ -39,7 +39,7 @@ public:
     void Init(Settings* settings, LyricsHost host);
     void Destroy();
 
-    void LoadMap();                 // 读取 .lyrics_map.txt
+    void LoadMap();                 // 读取 Data\lyrics_map.mpdf
     void LoadForCurrentSong();      // 切歌: 加载当前歌曲歌词并刷新悬浮窗
     void Tick();                    // 定时器: 按播放位置刷新高亮行
     void SetVisible(bool on);

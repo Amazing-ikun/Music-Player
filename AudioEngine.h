@@ -86,7 +86,7 @@ public:
     // 音量平衡: 按歌曲响度归一化, 使不同歌曲听感音量相近
     void SetBalanceEnabled(bool enabled);
     bool IsBalanceEnabled() const { return m_balanceEnabled; }
-    // 重新测量并应用当前歌曲的平衡增益 (测量结果会写入 .loudness.txt 缓存)
+    // 重新测量并应用当前歌曲的平衡增益 (测量结果会写入 Data\loudness.mpdf 缓存)
     void ApplyBalance();
 
     // 进度 (秒)

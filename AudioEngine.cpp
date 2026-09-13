@@ -15,10 +15,6 @@ static bool HasExtension(const std::wstring& path, const wchar_t* ext) {
     return e == ext;
 }
 
-static std::wstring ExeDir() {
-    return GetExeDirectory();
-}
-
 // ============================================
 // EBU R128 / BS.1770 响度测量
 // 每个声道级联 K-weighting 高通 + 高频搁架两个双二阶滤波器,
@@ -360,10 +356,10 @@ float AudioEngine::ComputeGainFromLUFS(double lufs) {
     return (float)lin;
 }
 
-// 读取 .loudness.txt 响度缓存
+// 读取 Data\loudness.mpdf 响度缓存
 void AudioEngine::LoadLoudnessCache() {
     m_loudnessCache.clear();
-    std::wstring filePath = ExeDir() + L"\\.loudness.txt";
+    std::wstring filePath = DataFile(L"loudness");
     HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ,
         NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return;
@@ -402,9 +398,9 @@ void AudioEngine::LoadLoudnessCache() {
     CloseHandle(hFile);
 }
 
-// 写回整个 .loudness.txt 缓存
+// 写回整个 Data\loudness.mpdf 缓存
 void AudioEngine::SaveLoudnessCache() {
-    std::wstring filePath = ExeDir() + L"\\.loudness.txt";
+    std::wstring filePath = DataFile(L"loudness");
     HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return;

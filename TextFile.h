@@ -27,3 +27,13 @@ bool WriteTextUtf8(const std::wstring& path, const std::wstring& text, bool with
 
 // 当前可执行文件所在目录 (无结尾反斜杠)
 std::wstring GetExeDirectory();
+
+// ---- 状态文件目录 (Data\) 与统一后缀 (.mpdf) ----
+// 所有状态文件统一放在 exe 目录下的 Data\ 里、以 .mpdf 为后缀, 不再散落成 exe 旁的 .txt。
+// 后缀自定义是为了让系统不再把它们关联到文本编辑器, 避免用户随手双击改坏。
+// 数据目录不可写时回退到 exe 目录; 调用方可用 GetDataDirectory() == GetExeDirectory() 判断是否发生了回退。
+std::wstring GetDataDirectory();             // exe\Data (必要时创建); 不可用则返回 exe 目录
+std::wstring DataFile(const wchar_t* name);  // 数据目录下 name + ".mpdf" 的全路径
+// 把旧版散落在 exe 目录的 .<name>.txt 一次性搬进 Data\(*.mpdf)。
+// 旧文件不存在、或新文件已存在时均跳过, 绝不覆盖已有数据。
+void MigrateLegacyStateFiles();

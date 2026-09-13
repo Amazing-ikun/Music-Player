@@ -2,3 +2,32 @@
 
 // App icon (32x32, 32-bit)
 IDI_APP_ICON ICON "icon.ico"
+
+// 版本信息: 供 exe 属性页显示, 并让安装包直接读取版本号而非写死
+1 VERSIONINFO
+ FILEVERSION 2,1,0,0
+ PRODUCTVERSION 2,1,0,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName",      "MusicPlayer"
+            VALUE "FileDescription",  "本地音乐播放器"
+            VALUE "FileVersion",      "2.1.0"
+            VALUE "InternalName",     "MusicPlayer"
+            VALUE "OriginalFilename", "MusicPlayer.exe"
+            VALUE "ProductName",      "MusicPlayer"
+            VALUE "ProductVersion",   "2.1.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END

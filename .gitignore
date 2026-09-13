@@ -13,7 +13,13 @@ build/
 *.sln
 *.suo
 
-# Runtime data
+# 发布暂存与安装包输出
+dist/
+installer-out/
+
+# Runtime data (状态文件统一放在 Data\ 下, 后缀 .mpdf)
+Data/
+# 旧版遗留的散落状态文件 (迁移到 Data\ 之前)
 .playlist.txt
 .lastfolder.txt
 .volume.txt

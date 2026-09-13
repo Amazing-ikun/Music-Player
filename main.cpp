@@ -6,10 +6,19 @@
 #include <windowsx.h>   // GET_X_LPARAM / GET_Y_LPARAM
 
 // MusicPlayer version
-static const wchar_t* APP_VERSION = L"2.0.2";
+static const wchar_t* APP_VERSION = L"2.1.0";
 
 // Changelog — shown in the About dialog
 static const wchar_t* CHANGELOG =
+    L"v2.1.0\r\n"
+    L"  - 调整: 状态文件不再散落成程序目录下的 .txt, 统一收进 Data\\ 子目录并改用 .mpdf 后缀, 系统因此不再把它们关联到文本编辑器, 避免用户随手双击改坏; 首次启动自动把旧的 .txt 原名搬进 Data\\(已存在新文件则不覆盖), .error.log 仍留在程序目录便于排查\r\n"
+    L"  - 修复: 随机播放时「上一首」不是刚才那首 (根因: 上一首只做下标 -1、沿歌单顺序走, 完全没走随机序列, 而下一首与自动续播都走随机序列)。现改为记录播放历史, 上一首 = 真正刚播放过的那首; 回退后再点下一首则沿同一段历史返回, 即浏览器式前进/后退\r\n"
+    L"  - 新增: 随机模式下双击列表选歌, 会把该歌从随机序列的原位置挪到当前歌之后并同步游标, 因此立即播放后随机顺序依然连续, 不跳歌也不重复\r\n"
+    L"  - 新增: 安装程序 (installer\\MusicPlayer.iss, Inno Setup): 用户级安装、不弹 UAC, 默认装到 %LOCALAPPDATA%\\Programs\\MusicPlayer, 也可在目录页改到其它盘 (会拦下 C:\\Program Files——那里对普通用户不可写, 会导致设置无法保存); 中文界面, 开始菜单与可选桌面快捷方式, 卸载时询问是否保留设置与听歌历史\r\n"
+    L"  - 新增: exe 写入版本信息 (FileVersion/ProductVersion 2.1.0 与中文说明), 文件属性页可见; 安装包的版本号也直接从中读取, 避免两处各写一份而漂移\r\n"
+    L"  - 优化: 音量条也支持点击轨道任意位置立即跳到该音量 (原为固定翻页, 每次只移动 10%), 与进度条行为一致\r\n"
+    L"  - 优化: 发布构建改为静态链接 gcc 运行库, 目标机无需另装 MinGW 运行库 (随包仅需附带 libwinpthread-1.dll); Release 关闭符号表以精简体积\r\n"
+    L"\r\n"
     L"v2.0.2\r\n"
     L"  - 重构: 桌面歌词编排抽成 LyricsController(歌词解析/悬浮窗/映射表集中管理), 悬浮窗 6 个回调合并为 LyricWindowListener 接口, 歌曲时长缓存抽成 DurationCache, 新增共用的 TextFile 文本读写模块(消除 4 处重复的编码转换), main.cpp 再精简约 500 行\r\n"
     L"  - 统一: .playlist.txt/.lastsong.txt/.lastfolder.txt/.playcount.txt/.lyrics_map.txt/.history.txt 落盘编码统一为 UTF-8 (读取时自动识别旧的 UTF-16, 旧文件仍可正常加载)\r\n"
@@ -328,6 +337,11 @@ private:
     std::vector<int> m_shuffleOrder;
     int              m_shufflePos;
 
+    // ---- 播放历史 (浏览器式 后退/前进) ----
+    // 存路径而不是下标: 歌单排序、增删都不会让历史失效; 已被移除的歌在回退时查不到会跳过
+    std::vector<std::wstring> m_playHistory;     // 后退栈, 末尾 = 最近播放过的那首
+    std::vector<std::wstring> m_forwardHistory;  // 前进栈, 回退后由此返回
+
     // ---- Settings / Tray ----
     Settings m_settings;
     TrayIcon m_trayIcon;
@@ -385,9 +399,10 @@ private:
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
 
-    // 进度条子类过程: 点击轨道(非滑块)时立即跳到点击处, 而非默认的翻页行为;
-    // 点在滑块上则交回默认处理, 保证拖拽功能不变。
-    static LRESULT CALLBACK SeekTrackProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+    // 进度条/音量条共用子类过程: 点击轨道(非滑块)时立即跳到点击处, 而非默认的翻页行为;
+    // 点在滑块上则交回默认处理, 保证拖拽功能不变。跳转后统一复用 OnHScroll,
+    // 由它按控件分派到 seek / volume 各自的处理逻辑。
+    static LRESULT CALLBACK TrackbarClickProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                                           UINT_PTR id, DWORD_PTR refData) {
         if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK) {
             POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
@@ -425,14 +440,14 @@ private:
                 SendMessageW(hwnd, TBM_SETPOS, TRUE, pos);
 
                 MainWindow* self = (MainWindow*)refData;
-                if (self) {   // 复用 WM_HSCROLL 的跳转逻辑
+                if (self) {   // 复用 WM_HSCROLL 的跳转/设值逻辑
                     self->OnHScroll(MAKEWPARAM(TB_THUMBPOSITION, 0), (LPARAM)hwnd);
                 }
                 SetFocus(hwnd);
                 return 0;   // 吞掉默认翻页/捕获处理
             }
         } else if (msg == WM_NCDESTROY) {
-            RemoveWindowSubclass(hwnd, &MainWindow::SeekTrackProc, id);
+            RemoveWindowSubclass(hwnd, &MainWindow::TrackbarClickProc, id);
         }
         return DefSubclassProc(hwnd, msg, wp, lp);
     }
@@ -466,7 +481,7 @@ private:
                     // 把状态定死在休眠之前, 免得醒来后卡在"正在播放"
                     m_audio.FinishPendingPause();
                     StopListening();
-                    m_history.Save(GetExeDirectory() + L"\\.history.txt");
+                    m_history.Save(DataFile(L"history"));
                 } else if (wp == PBT_APMRESUMESUSPEND || wp == PBT_APMRESUMEAUTOMATIC) {
                     m_audio.ResumeAfterSuspend();
                     if (m_audio.IsPlaying())
@@ -536,6 +551,12 @@ private:
     }
 
     void OnCreate() {
+        // 状态文件统一为 Data\*.mpdf: 先把旧版散落的 .<name>.txt 搬过去。
+        // 必须早于任何读取, 否则首次启动会把老用户的设置/历史当成不存在
+        MigrateLegacyStateFiles();
+        if (GetDataDirectory() == GetExeDirectory())
+            Log(L"数据目录 Data\\ 不可写, 状态文件回退到程序目录");
+
         m_trayIcon.SetTarget(m_hInst, m_hwnd);
         INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_WIN95_CLASSES | ICC_DATE_CLASSES };
         InitCommonControlsEx(&icc);
@@ -565,7 +586,7 @@ private:
         }
 
         LoadVolume();
-        m_history.Load(GetExeDirectory() + L"\\.history.txt");
+        m_history.Load(DataFile(L"history"));
         m_audio.SetNotifyWindow(m_hwnd, WM_USER_SONG_END);
         m_audio.SetFadeNotify(m_hwnd, WM_APP_FADE_DONE);
         LyricsHost lyricsHost;
@@ -654,7 +675,7 @@ private:
 
     void OnRealClose() {
         StopListening();
-        m_history.Save(GetExeDirectory() + L"\\.history.txt");
+        m_history.Save(DataFile(L"history"));
         if (m_settings.rememberProgress) SaveLastSong();
         SavePlayCount();
         SavePlaylist();
@@ -804,6 +825,8 @@ private:
         SendMessageW(m_sliderVol, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
         SendMessageW(m_sliderVol, TBM_SETPOS, TRUE, 80);
         SendMessageW(m_sliderVol, TBM_SETPAGESIZE, 0, 10);
+        // 让点击轨道立即跳到该音量 (默认是翻页), 见 TrackbarClickProc
+        SetWindowSubclass(m_sliderVol, &MainWindow::TrackbarClickProc, IDC_SLIDER_VOL, (DWORD_PTR)this);
 
         m_trackSeek = CreateWindowExW(0, TRACKBAR_CLASSW, NULL,
             WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_FIXEDLENGTH | TBS_NOTICKS,
@@ -811,8 +834,8 @@ private:
         SendMessageW(m_trackSeek, TBM_SETRANGE, TRUE, MAKELPARAM(0, SEEK_RES));
         SendMessageW(m_trackSeek, TBM_SETPOS, TRUE, 0);
         SendMessageW(m_trackSeek, TBM_SETPAGESIZE, 0, SEEK_RES / 20);
-        // 让点击轨道立即跳转 (默认是翻页), 见 SeekTrackProc
-        SetWindowSubclass(m_trackSeek, &MainWindow::SeekTrackProc, IDC_TRACK_SEEK, (DWORD_PTR)this);
+        // 让点击轨道立即跳转 (默认是翻页), 见 TrackbarClickProc
+        SetWindowSubclass(m_trackSeek, &MainWindow::TrackbarClickProc, IDC_TRACK_SEEK, (DWORD_PTR)this);
 
         m_staticTime = CreateWindowExW(0, L"STATIC", L"00:00 / 00:00",
             WS_CHILD | WS_VISIBLE, 0, 0, 0, 0,
@@ -1081,7 +1104,7 @@ private:
                 case NM_DBLCLK: {
                     LPNMITEMACTIVATE ia = (LPNMITEMACTIVATE)lp;
                     if (ia->iItem >= 0 && ia->iItem < (int)m_filterMap.size()) {
-                        PlayFile(m_filterMap[ia->iItem]);
+                        PlayFromList(m_filterMap[ia->iItem]);
                     }
                     return 0;
                 }
@@ -1141,10 +1164,10 @@ private:
 
                     if (cmd > 0) {
                         switch (cmd) {
-                            case 3101: PlayFile(songIdx); break;
+                            case 3101: PlayFromList(songIdx); break;
                             case 3102:
                                 if (!m_audio.IsLoaded() || !m_audio.IsPlaying())
-                                    PlayFile(songIdx);
+                                    PlayFromList(songIdx);
                                 else
                                     m_nextScheduled = songIdx;
                                 break;
@@ -1291,7 +1314,7 @@ private:
                     StopListening();
                     StartListening();
                 }
-                m_history.Save(GetExeDirectory() + L"\\.history.txt");
+                m_history.Save(DataFile(L"history"));
             }
         }
     }
@@ -1374,6 +1397,7 @@ private:
             m_currentIndex = -1;
             m_userDraggingSeek = false;
 
+            ClearHistory();
             SaveLastFolder(path);
             m_playlist.ScanFolder(path);
             m_sortColumn = 1;
@@ -1593,6 +1617,19 @@ private:
     void OnPrev() {
         int count = m_playlist.GetCount();
         if (count == 0) return;
+        // 后退: 回到"刚才播放过的那首", 而不是歌单里的前一格
+        // (随机模式下后者根本不是刚才那首)
+        while (!m_playHistory.empty()) {
+            std::wstring path = m_playHistory.back();
+            m_playHistory.pop_back();
+            int idx = IndexOfPath(path);
+            if (idx < 0 || idx == m_currentIndex) continue;  // 已移除/即当前这首, 跳过
+            if (m_currentIndex >= 0 && m_currentIndex < count)
+                m_forwardHistory.push_back(m_playlist.GetFile(m_currentIndex));
+            PlayFile(idx, false);
+            return;
+        }
+        // 没有历史可回退(如刚启动): 维持原有的"回到歌单前一首/末尾"
         int idx = (m_currentIndex <= 0) ? count - 1 : m_currentIndex - 1;
         PlayFile(idx);
     }
@@ -1600,6 +1637,17 @@ private:
     void OnNext() {
         int count = m_playlist.GetCount();
         if (count == 0) return;
+        // 前进: 回退过之后再点下一首, 先沿前进栈返回(浏览器式), 而不是重新随机一首
+        while (!m_forwardHistory.empty()) {
+            std::wstring path = m_forwardHistory.back();
+            m_forwardHistory.pop_back();
+            int idx = IndexOfPath(path);
+            if (idx < 0 || idx == m_currentIndex) continue;
+            if (m_currentIndex >= 0 && m_currentIndex < count)
+                PushPlayHistory(m_playlist.GetFile(m_currentIndex));
+            PlayFile(idx, false);
+            return;
+        }
         int idx;
         if (m_audio.GetPlayMode() == PlayMode::Shuffle) {
             m_shufflePos++;
@@ -1881,8 +1929,69 @@ private:
     }
 
 
+    // 查歌单中某路径的下标, 不存在(已被移除/不在当前歌单)返回 -1
+    int IndexOfPath(const std::wstring& path) const {
+        for (int i = 0; i < m_playlist.GetCount(); i++)
+            if (m_playlist.GetFile(i) == path) return i;
+        return -1;
+    }
+
+    void PushPlayHistory(const std::wstring& path) {
+        constexpr size_t kMaxHistory = 200;
+        m_playHistory.push_back(path);
+        if (m_playHistory.size() > kMaxHistory)
+            m_playHistory.erase(m_playHistory.begin());
+    }
+
+    // 一次"前进式"换歌(下一首/自动续播/手动选歌)时记一笔:
+    // 当前歌入后退栈, 并清空前进栈(相当于浏览器里跳到了新页面, 旧的前进路径作废)
+    void RecordHistory(int newIndex) {
+        if (m_currentIndex >= 0 && m_currentIndex < m_playlist.GetCount() &&
+            m_currentIndex != newIndex) {
+            PushPlayHistory(m_playlist.GetFile(m_currentIndex));
+        }
+        m_forwardHistory.clear();
+    }
+
+    void ClearHistory() {
+        m_playHistory.clear();
+        m_forwardHistory.clear();
+    }
+
+    // 把 idx 从随机序列原位置摘出来、插到当前歌之后, 游标随之指向它。
+    // 目的: 手动选歌后随机序列依然连续(不跳歌、不重复)
+    void MoveNextInShuffle(int idx) {
+        if (m_shuffleOrder.size() != (size_t)m_playlist.GetCount())
+            Reshuffle();
+        // 游标对齐到当前正在播放的歌(双击/历史回退都可能让它脱节); 没有播放中的歌则视为插到最前
+        int anchor = -1;
+        if (m_currentIndex >= 0) {
+            for (size_t i = 0; i < m_shuffleOrder.size(); i++) {
+                if (m_shuffleOrder[i] == m_currentIndex) { anchor = (int)i; break; }
+            }
+        }
+        auto it = std::find(m_shuffleOrder.begin(), m_shuffleOrder.end(), idx);
+        if (it == m_shuffleOrder.end()) return;
+        m_shuffleOrder.erase(it);
+        int insertAt = anchor + 1;
+        if (insertAt > (int)m_shuffleOrder.size()) insertAt = (int)m_shuffleOrder.size();
+        if (insertAt < 0) insertAt = 0;
+        m_shuffleOrder.insert(m_shuffleOrder.begin() + insertAt, idx);
+        m_shufflePos = insertAt;
+    }
+
+    // 从列表/右键菜单直接选歌播放: 随机模式下先把它挪到当前歌之后, 再立即播放
+    void PlayFromList(int idx) {
+        if (idx < 0 || idx >= m_playlist.GetCount()) return;
+        if (m_audio.GetPlayMode() == PlayMode::Shuffle && idx != m_currentIndex)
+            MoveNextInShuffle(idx);
+        PlayFile(idx);
+    }
+
     // Play file
-    void PlayFile(int index) {
+    // recordHistory: 是否把这次换歌计入播放历史(后退/前进用)。
+    // 由历史本身发起的导航传 false, 否则会把刚回退掉的那首又推回去
+    void PlayFile(int index, bool recordHistory = true) {
         if (index < 0 || index >= m_playlist.GetCount()) return;
 
         KillTimer(m_hwnd, TIMER_ID_SEEK);
@@ -1901,6 +2010,7 @@ private:
             return;
         }
 
+        if (recordHistory) RecordHistory(index);
         m_currentIndex = index;
         m_lyricsCtl.LoadForCurrentSong();
         if (m_audio.IsBalanceEnabled()) {
@@ -2094,7 +2204,7 @@ private:
         RebuildDurationScanQueue();
     }
 
-    // ---- Duration cache (.durations.txt) & progressive scan ----
+    // ---- Duration cache (Data\durations.mpdf) & progressive scan ----
 
     // 歌单中时长未知且缓存命中(文件未变)的歌曲, 直接恢复缓存时长
     void ApplyDurationCache() {
@@ -2190,10 +2300,10 @@ private:
 
     // Hotkey bindings persistence
     
-    // Hotkey bindings persistence (.hotkeys.txt) - ANSI
+    // Hotkey bindings persistence (Data\hotkeys.mpdf)
     
     void SaveHotkeyBindings() {
-        std::wstring filePath = GetExeDirectory() + L"\\.hotkeys.txt";
+        std::wstring filePath = DataFile(L"hotkeys");
         HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile == INVALID_HANDLE_VALUE) return;
@@ -2208,7 +2318,7 @@ private:
     }
 
     void LoadHotkeyBindings() {
-        std::wstring filePath = GetExeDirectory() + L"\\.hotkeys.txt";
+        std::wstring filePath = DataFile(L"hotkeys");
         HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
             FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile == INVALID_HANDLE_VALUE) return;
@@ -2255,18 +2365,18 @@ private:
     }
 
     
-    // Settings persistence (.settings.txt)
+    // Settings persistence (Data\settings.mpdf)
     
     void SaveSettings() {
         SaveHotkeyBindings();
         m_settings.playMode = (int)m_audio.GetPlayMode();
         m_settings.playSpeed = m_audio.GetSpeed();
-        m_settings.Save(GetExeDirectory() + L"\\.settings.txt");
+        m_settings.Save(DataFile(L"settings"));
     }
 
     void LoadSettings() {
         LoadHotkeyBindings();
-        m_settings.Load(GetExeDirectory() + L"\\.settings.txt");
+        m_settings.Load(DataFile(L"settings"));
         m_audio.SetBalanceEnabled(m_settings.balanceEnabled);
         m_audio.SetPlayMode(static_cast<PlayMode>(m_settings.playMode));
         m_audio.SetSpeed(m_settings.playSpeed);
@@ -2380,12 +2490,12 @@ private:
         swprintf(posBuf, 64, L"%.3f\n", m_audio.GetPosition());
         std::wstring text = std::wstring(idxBuf) + posBuf +
                             m_playlist.GetFile(m_currentIndex) + L"\n";
-        WriteTextUtf8(GetExeDirectory() + L"\\.lastsong.txt", text);
+        WriteTextUtf8(DataFile(L"lastsong"), text);
     }
 
     bool LoadLastSong() {
         std::vector<std::wstring> lines =
-            ReadLinesAuto(GetExeDirectory() + L"\\.lastsong.txt");
+            ReadLinesAuto(DataFile(L"lastsong"));
         if (lines.size() < 2) return false;
         int savedIndex = _wtoi(lines[0].c_str());
         double savedPos = _wtof(lines[1].c_str());
@@ -2423,12 +2533,12 @@ private:
         std::wstring text;
         for (const auto& entry : m_playCount)
             text += entry.first + L"=" + std::to_wstring(entry.second) + L"\n";
-        WriteTextUtf8(GetExeDirectory() + L"\\.playcount.txt", text);
+        WriteTextUtf8(DataFile(L"playcount"), text);
     }
 
     void LoadPlayCount() {
         for (const std::wstring& line :
-                ReadLinesAuto(GetExeDirectory() + L"\\.playcount.txt")) {
+                ReadLinesAuto(DataFile(L"playcount"))) {
             size_t eq = line.find(L'=');
             if (eq == std::wstring::npos) continue;
             std::wstring path = line.substr(0, eq);
@@ -2443,13 +2553,14 @@ private:
         std::wstring text;
         for (int i = 0; i < m_playlist.GetCount(); i++)
             text += m_playlist.GetFile(i) + L"\n";
-        WriteTextUtf8(GetExeDirectory() + L"\\.playlist.txt", text);
+        WriteTextUtf8(DataFile(L"playlist"), text);
     }
 
     bool LoadPlaylist() {
+        ClearHistory();
         m_playlist.Clear();
         for (const std::wstring& line :
-                ReadLinesAuto(GetExeDirectory() + L"\\.playlist.txt")) {
+                ReadLinesAuto(DataFile(L"playlist"))) {
             if (GetFileAttributesW(line.c_str()) != INVALID_FILE_ATTRIBUTES)
                 m_playlist.AddFile(line);
         }
@@ -2469,18 +2580,19 @@ private:
 
     // Last folder persistence
     void SaveLastFolder(const std::wstring& folderPath) {
-        WriteTextUtf8(GetExeDirectory() + L"\\.lastfolder.txt", folderPath + L"\n");
+        WriteTextUtf8(DataFile(L"lastfolder"), folderPath + L"\n");
     }
 
     bool LoadFromLastFolder() {
         std::vector<std::wstring> lines =
-            ReadLinesAuto(GetExeDirectory() + L"\\.lastfolder.txt");
+            ReadLinesAuto(DataFile(L"lastfolder"));
         if (lines.empty()) return false;
         const std::wstring& folder = lines[0];
         if (GetFileAttributesW(folder.c_str()) == INVALID_FILE_ATTRIBUTES ||
             !(GetFileAttributesW(folder.c_str()) & FILE_ATTRIBUTE_DIRECTORY)) {
             return false;
         }
+        ClearHistory();
         m_playlist.ScanFolder(folder);
         m_sortColumn = 1;
         m_sortAscending = true;
@@ -2493,7 +2605,7 @@ private:
 
     // Volume persistence
     void SaveVolume() {
-        std::wstring filePath = GetExeDirectory() + L"\\.volume.txt";
+        std::wstring filePath = DataFile(L"volume");
         int vol = (int)SendMessageW(m_sliderVol, TBM_GETPOS, 0, 0);
         HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_WRITE, 0, NULL,
             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -2506,7 +2618,7 @@ private:
     }
 
     void LoadVolume() {
-        std::wstring filePath = GetExeDirectory() + L"\\.volume.txt";
+        std::wstring filePath = DataFile(L"volume");
         HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ,
             FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile == INVALID_HANDLE_VALUE) return;

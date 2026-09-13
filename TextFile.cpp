@@ -111,3 +111,50 @@ std::wstring GetExeDirectory() {
     if (last) *last = L'\0';
     return path;
 }
+
+// ---- 状态文件目录与统一后缀 ----
+
+namespace {
+const wchar_t kDataDirName[] = L"Data";
+const wchar_t kDataFileExt[] = L".mpdf";
+}
+
+std::wstring GetDataDirectory() {
+    // 目录是否可用在运行期不会变, 只解析一次
+    static std::wstring cached;
+    if (!cached.empty()) return cached;
+
+    std::wstring dir = GetExeDirectory() + L"\\" + kDataDirName;
+    bool usable = CreateDirectoryW(dir.c_str(), NULL) != FALSE ||
+                  GetLastError() == ERROR_ALREADY_EXISTS;
+    if (usable) {
+        // 目录可能已存在但不可写, 用临时探针确认; FILE_FLAG_DELETE_ON_CLOSE 使其关闭即消失
+        std::wstring probe = dir + L"\\writetest";
+        HANDLE h = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                               FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
+        usable = (h != INVALID_HANDLE_VALUE);
+        if (usable) CloseHandle(h);
+    }
+    cached = usable ? dir : GetExeDirectory();
+    return cached;
+}
+
+std::wstring DataFile(const wchar_t* name) {
+    return GetDataDirectory() + L"\\" + name + kDataFileExt;
+}
+
+void MigrateLegacyStateFiles() {
+    static const wchar_t* kNames[] = {
+        L"settings", L"hotkeys", L"volume", L"lastsong", L"lastfolder",
+        L"playlist", L"playcount", L"lyrics_map", L"history",
+        L"durations", L"loudness",
+    };
+    std::wstring exeDir = GetExeDirectory();
+    for (const wchar_t* name : kNames) {
+        std::wstring oldPath = exeDir + L"\\." + name + L".txt";
+        std::wstring newPath = DataFile(name);   // 顺带确保 Data\ 已创建
+        if (GetFileAttributesW(oldPath.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+        if (GetFileAttributesW(newPath.c_str()) != INVALID_FILE_ATTRIBUTES) continue;
+        MoveFileW(oldPath.c_str(), newPath.c_str());
+    }
+}

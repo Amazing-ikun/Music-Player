@@ -28,6 +28,16 @@ else()
     set(BASS_LIB_DIR "${BASS_DIR}/lib/x86")
 endif()
 
+# BASS 是专有软件, 不在本仓库中分发; 缺失时给出明确指引, 而不是让编译到一半才报错
+if (NOT EXISTS "${BASS_DIR}/include/bass.h" OR NOT EXISTS "${BASS_LIB_DIR}/bass.lib")
+    message(FATAL_ERROR
+        "未找到 BASS 音频库 (需要 ${BASS_DIR}/include/bass.h 与 ${BASS_LIB_DIR}/bass.lib)。\n"
+        "BASS 是 Un4seen Developments 的专有软件, 本项目不包含它, 请自行下载:\n"
+        "    https://www.un4seen.com/bass.html   (BASS / BASS_FX / BASSFLAC)\n"
+        "然后按 README.md 的说明放到 ${PROJECT_SOURCE_DIR}/bass,\n"
+        "或在配置时用 -DBASS_DIR=<你的目录> 指定。")
+endif()
+
 include_directories("${BASS_DIR}/include")
 link_directories("${BASS_LIB_DIR}")
 
@@ -134,15 +144,12 @@ add_custom_command(TARGET MusicPlayer POST_BUILD
 # ============================================
 # 用法: cmake --install <build-dir> --prefix dist
 # 只装 exe 与 BASS 运行时 DLL; Data\ 状态文件与 .error.log 是运行时产物, 绝不打包
+# 只装 exe 与 MinGW 运行库; BASS 的 DLL 不在本项目中分发, 由用户自行放置 (见 README.md)
 install(TARGETS MusicPlayer RUNTIME DESTINATION .)
-install(FILES
-    "${BASS_LIB_DIR}/bass.dll"
-    "${BASS_LIB_DIR}/bass_fx.dll"
-    "${BASS_LIB_DIR}/bassflac.dll"
-    DESTINATION .)
 if (MINGW)
     install(FILES "${MINGW_RUNTIME_DLL}" DESTINATION .)
 endif()
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/README.md" DESTINATION .)
 # 许可证与第三方归属: Apache-2.0 第 4 条要求向接收者随附一份许可文本
 install(FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"

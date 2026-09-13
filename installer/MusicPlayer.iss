@@ -68,13 +68,11 @@ Name: "chinese"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务:"; Flags: unchecked
 
 [Files]
-; 只装 exe 与运行时 DLL; Data\ 状态文件与 .error.log 是运行时产物, 不打包
+; 只装 exe 与 MinGW 运行库; Data\ 状态文件与 .error.log 是运行时产物, 不打包
+; BASS 的 DLL 不在本项目中分发(它是 Un4seen 的专有软件), 需用户自行放置, 见 README.md
 Source: "{#DistDir}\{#AppExe}";           DestDir: "{app}"; Flags: ignoreversion
-Source: "{#DistDir}\bass.dll";            DestDir: "{app}"; Flags: ignoreversion
-Source: "{#DistDir}\bass_fx.dll";         DestDir: "{app}"; Flags: ignoreversion
-Source: "{#DistDir}\bassflac.dll";        DestDir: "{app}"; Flags: ignoreversion
-; MinGW 运行库(静态 libstdc++ 仍引用 winpthread)
 Source: "{#DistDir}\libwinpthread-1.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#DistDir}\README.md";           DestDir: "{app}"; Flags: ignoreversion
 ; 许可证与第三方归属 (Apache-2.0 第 4 条要求随附许可文本)
 Source: "{#DistDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion
 
@@ -100,6 +98,19 @@ begin
            '请改选一个可写目录 (例如 D:\MusicPlayer)。', mbError, MB_OK);
     Result := False;
   end;
+end;
+
+{ 安装完成后: 没有 BASS 的 DLL 就无法播放。它不随本安装包提供, 需提示用户自行放置 }
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    if not FileExists(ExpandConstant('{app}\bass.dll')) then
+      MsgBox('MusicPlayer 还需要 BASS 音频库才能播放, 它不随本安装包提供。' + #13#10#13#10 +
+             '请从 https://www.un4seen.com/ 下载 BASS、BASS_FX、BASSFLAC, ' +
+             '并把 bass.dll、bass_fx.dll、bassflac.dll 复制到:' + #13#10 +
+             ExpandConstant('{app}') + #13#10#13#10 +
+             '详见该目录下的 README.md。',
+             mbInformation, MB_OK);
 end;
 
 { 卸载时询问是否连用户数据一起删除; 默认保留 }

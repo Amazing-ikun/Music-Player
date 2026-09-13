@@ -26,18 +26,14 @@ THIRD-PARTY COMPONENTS ARE NOT COVERED BY THE LICENSES ABOVE
 
 This is a personal, non-commercial hobby project.
 
-It builds against the BASS audio library. BASS is proprietary software of
-Un4seen Developments Ltd. and is NOT licensed under Apache-2.0 or BSD-3-Clause.
-BASS must be obtained separately from Un4seen Developments
-(https://www.un4seen.com/): it is free of charge for non-commercial use, and
-any commercial use requires a license purchased from Un4seen Developments.
+The project builds against and requires the BASS audio library. BASS is
+proprietary software of Un4seen Developments Ltd. and is NOT licensed under
+Apache-2.0 or BSD-3-Clause. No BASS files are included in this repository or in
+the released binaries; BASS must be obtained separately from Un4seen
+Developments (https://www.un4seen.com/). BASS is free of charge for
+non-commercial use, and any commercial use requires a license purchased from
+Un4seen Developments. See README.md for how to supply BASS, and
+BASS-LICENSE.txt for the BASS license terms.
 
-For build convenience, unmodified copies of the BASS SDK files are kept in this
-repository under bass/ (the headers, the import libraries and the runtime
-DLLs). Those copies remain the property of Un4seen Developments, are governed
-solely by the BASS license, and confer no rights under this project's
-licenses — they do not take the place of obtaining BASS yourself. The full BASS
-license text is reproduced in BASS-LICENSE.txt.
-
-The Windows build also redistributes libwinpthread-1.dll from the mingw-w64
+The released Windows binaries include libwinpthread-1.dll from the mingw-w64
 project under its own MIT-style license. See NOTICE.

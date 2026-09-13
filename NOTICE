@@ -6,29 +6,14 @@ BSD 3-Clause License (SPDX: Apache-2.0 AND BSD-3-Clause).
 See LICENSE, LICENSE-Apache-2.0.txt and LICENSE-BSD-3-Clause.txt.
 
 This NOTICE file is provided in accordance with Section 4(d) of the Apache
-License, Version 2.0, and to record the attribution required by the other
-licenses covering the third-party components listed below.
+License, Version 2.0, and to record the attribution required by the licenses
+covering the third-party components that are redistributed.
 
 
-Third-party components
-======================
+Third-party components that ARE redistributed
+=============================================
 
-1. BASS audio library and add-ons
-   Files: bass/include/bass.h, bass/include/bass_fx.h,
-          bass/lib/x64/bass.dll, bass_fx.dll, bassflac.dll (and the matching
-          import libraries bass.lib, bass_fx.lib, bassflac.lib)
-   Copyright (c) 1999-2025 Un4seen Developments Ltd.  All rights reserved.
-
-   BASS is proprietary software and is NOT covered by this project's licenses.
-   This project is a personal, non-commercial hobby project; BASS is free of
-   charge for non-commercial use. Any commercial use requires a license
-   purchased from Un4seen Developments. BASS must be obtained separately from
-   Un4seen Developments (https://www.un4seen.com/): the unmodified copies kept
-   under bass/ are included only so that the project can be built, and they
-   confer no rights under this project's licenses. The full BASS license text
-   is reproduced in BASS-LICENSE.txt.
-
-2. libwinpthread-1.dll
+1. libwinpthread-1.dll
    Copyright (c) 2011 mingw-w64 project
 
    Licensed under an MIT-style permissive license (permission is hereby
@@ -38,9 +23,24 @@ Third-party components
    are included). Portions are derived from the "Posix Threads library for
    Microsoft Windows". Source: https://www.mingw-w64.org/
 
-3. GCC runtime, statically linked (libgcc, libstdc++)
+2. GCC runtime, statically linked (libgcc, libstdc++)
    Copyright (c) Free Software Foundation, Inc.
 
    Distributed under the GNU General Public License version 3 with the GCC
    Runtime Library Exception, which permits linking these runtime libraries
    with independent modules. No source code from these libraries is modified.
+
+
+External dependency that is NOT redistributed
+=============================================
+
+BASS audio library (bass, BASS_FX, BASSFLAC)
+   Copyright (c) 1999-2025 Un4seen Developments Ltd.  All rights reserved.
+
+   The project builds against and requires BASS, but BASS is NOT included in
+   this repository nor in the released binaries. It must be obtained
+   separately from Un4seen Developments (https://www.un4seen.com/): free of
+   charge for non-commercial use, and requiring a license purchased from
+   Un4seen Developments for commercial use. This project is a personal,
+   non-commercial hobby project. See README.md for how to supply BASS, and
+   BASS-LICENSE.txt for its license terms.

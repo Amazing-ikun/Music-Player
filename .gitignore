@@ -37,7 +37,9 @@ Data/
 # Claude
 .claude/
 
-# BASS SDK (download separately)
+# BASS SDK — 第三方专有软件, 不在本仓库中分发, 需自行从 un4seen.com 下载
+# 见 README.md; bass/ 是 CMake 期望的放置位置
+bass/
 bass24/
 bass_fx24/
 bassflac24/
